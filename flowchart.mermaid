@@ -1,0 +1,75 @@
+flowchart TD
+    Start([시작]) --> LoadEnv[env1.env 로드<br/>환경변수 읽기]
+    LoadEnv --> ConnectChrome[Chrome 연결<br/>127.0.0.1:9222<br/>debuggerAddress]
+    ConnectChrome --> FillBasic[기본 정보 입력]
+
+    subgraph S1[Cell 1 · 신청서 작성]
+        FillBasic --> F1[신청유형 select<br/>req_kind]
+        F1 --> F2[계약일자 JS 주입<br/>contract_day]
+        F2 --> F3[차종 select<br/>model_cd]
+        F3 --> F4[신청대수 입력<br/>req_cnt]
+        F4 --> F5[출고예정일 JS 주입<br/>delivery_sch_day]
+        F5 --> F6[연락처 입력<br/>phone / mobile / email]
+        F6 --> F7[기관명 입력<br/>req_nm]
+        F7 --> F8[신청구분 select<br/>grp_reqst_se]
+        F8 --> F9[대표자/법인번호/<br/>사업자번호/사업장명]
+        F9 --> F10[판매자 정보 입력<br/>seller_phone / contact_*<br/>seller_mgrid]
+
+        F10 --> AddrPopup{{주소 검색 팝업}}
+        AddrPopup --> A1[팝업 버튼 클릭<br/>addrPopup]
+        A1 --> A2[새 창 핸들 전환]
+        A2 --> A3[keyword에 ADDRESS 입력]
+        A3 --> A4[searchUrlJuso 검색]
+        A4 --> A5[setMaping 첫 결과 클릭<br/>스크롤 + JS click 재시도]
+        A5 --> A6[상세주소 입력<br/>rtAddrDetail]
+        A6 --> A7[setParent 클릭<br/>부모창 반영]
+        A7 --> A8[부모 창으로 복귀]
+
+        A8 --> Save[goSave 클릭]
+        Save --> Alert1{Confirm Alert?}
+        Alert1 -->|Yes| Accept1[alert.accept]
+        Alert1 -->|TimeoutException| Skip1[alert 안 뜸 로그]
+        Accept1 --> NewWin
+        Skip1 --> NewWin
+
+        NewWin[저장 후 새창 전환] --> Captcha[랜덤 코드 검증]
+        Captcha --> C1[span.guide 텍스트 추출]
+        C1 --> C2[문자열 거꾸로 뒤집기]
+        C2 --> C3[randeomChk에 입력]
+        C3 --> C4[goCompare 클릭]
+        C4 --> Back1[부모 창 복귀]
+    end
+
+    Back1 --> Cell2Start[Cell 2 시작]
+
+    subgraph S2[Cell 2 · 파일 첨부 & 지원신청]
+        Cell2Start --> LoadFile[FILE1 경로 로드]
+        LoadFile --> Loop{첨부 루프<br/>A / A2 / A3}
+
+        Loop --> H1[popupAttachFile id 클릭]
+        H1 --> H2[새창 전환 + readyState complete]
+        H2 --> H3[#filename input 탐색]
+        H3 --> H4[JS로 hidden/disabled 해제<br/>display/visibility/size 강제]
+        H4 --> H5[send_keys 파일경로<br/>실패 시 재시도 2회]
+        H5 --> H6[goSave 클릭<br/>팝업 form 내부]
+        H6 --> H7[자식창 alert 수락]
+        H7 --> H8[자식창 닫힘 대기]
+        H8 --> H9[부모창 복귀]
+        H9 --> H10[부모창 alert 추가 수락]
+        H10 -->|다음 ID| Loop
+        Loop -->|완료| Apply
+
+        Apply[goApply 101 클릭<br/>지원신청] --> ApplyAlert[alert 수락]
+    end
+
+    ApplyAlert --> End([끝])
+
+    classDef io fill:#fef3c7,stroke:#d97706,stroke-width:1px;
+    classDef popup fill:#dbeafe,stroke:#2563eb,stroke-width:1px;
+    classDef alert fill:#fee2e2,stroke:#dc2626,stroke-width:1px;
+    classDef terminal fill:#dcfce7,stroke:#16a34a,stroke-width:2px;
+
+    class LoadEnv,LoadFile io
+    class AddrPopup,NewWin,H2 popup
+    class Alert1,Accept1,Skip1,H7,H10,ApplyAlert alert
+    class Start,End terminal
