@@ -37,6 +37,8 @@ class RowFrame(ctk.CTkFrame):
         self.env_var = tk.StringVar()
         self.file1_var = tk.StringVar()
         self._status_var = tk.StringVar(value="대기")
+        self._driver_holder = None
+        self._active_thread = None
 
         self.grid_columnconfigure(0, weight=1)
         self._build_card()
@@ -236,9 +238,13 @@ class RowFrame(ctk.CTkFrame):
     def _open_chrome(self):
         self._select_card()
         try:
-            open_chrome(self.port)
+            filled, message = open_chrome(self.port)
             self._log(f"Chrome 실행됨 (포트 :{self.port})")
-            self._log("열린 브라우저에서 로그인한 뒤 [실행]을 클릭하세요.")
+            self._log(message)
+            if filled:
+                self._log("비밀번호를 입력하고 로그인한 뒤 [실행]을 클릭하세요.")
+            else:
+                self._log("이미 로그인되어 있으면 바로 [실행]을 클릭하세요.")
         except Exception as e:
             self._log(f"Chrome 열기 실패: {e}")
 
@@ -257,17 +263,31 @@ class RowFrame(ctk.CTkFrame):
             self._log(f"FILE1 파일 없음: {file1_path}")
             return
 
+        if self._active_thread and self._active_thread.is_alive():
+            if self._driver_holder and self._driver_holder.get("driver"):
+                try:
+                    self._driver_holder["driver"].quit()
+                except Exception:
+                    pass
+            self._log("이전 실행을 중단했습니다.")
+
+        driver_holder = {"driver": None}
+        self._driver_holder = driver_holder
         self.after(0, lambda: self._set_status("실행중", "#dbeafe", "#1d4ed8"))
 
         def _task():
             try:
-                run_all(path, self.port, self._log, file1_path=file1_path or None)
-                self.after(0, lambda: self._set_status("완료", "#dcfce7", "#166534"))
+                run_all(path, self.port, self._log, file1_path=file1_path or None, driver_holder=driver_holder)
+                if self._driver_holder is driver_holder:
+                    self.after(0, lambda: self._set_status("완료", "#dcfce7", "#166534"))
             except Exception as e:
-                self.after(0, lambda: self._set_status("오류", "#ffe4e6", "#be123c"))
-                self._log(f"오류: {e}")
+                if self._driver_holder is driver_holder:
+                    self.after(0, lambda: self._set_status("오류", "#ffe4e6", "#be123c"))
+                    self._log(f"오류: {e}")
 
-        threading.Thread(target=_task, daemon=True).start()
+        t = threading.Thread(target=_task, daemon=True)
+        self._active_thread = t
+        t.start()
 
 
 class App(ctk.CTk):
