@@ -1710,7 +1710,21 @@ def _run_form(driver, wait, cfg, log, stop_at_security_popup=False):
 # 파일 첨부 (2단계)
 # ──────────────────────────────────────────
 
-_REQUIRED_ATTACH_IDS = ["A", "A2", "A3", "A7"]
+_DEFAULT_ATTACH_IDS = ["A", "A2", "A3", "A7"]
+
+
+def _attach_ids_from_cfg(cfg):
+    raw = _cfg_text(cfg, "ATTACH_IDS")
+    if not raw:
+        return list(_DEFAULT_ATTACH_IDS)
+
+    attach_ids = []
+    for item in raw.replace(";", ",").replace("|", ",").split(","):
+        attach_id = item.strip()
+        if attach_id and attach_id not in attach_ids:
+            attach_ids.append(attach_id)
+
+    return attach_ids or list(_DEFAULT_ATTACH_IDS)
 
 
 def _attach_slot_state(driver, attach_id):
@@ -1975,15 +1989,16 @@ def _run_attach(driver, wait, cfg, log):
 
     _switch_to_form_window(driver, log)
     _wait_for_page_idle(driver, log, "첨부 반영 확인 전 부모 화면", timeout=3)
-    log(f"  고정 첨부 순서: {', '.join(_REQUIRED_ATTACH_IDS)}")
+    attach_ids = _attach_ids_from_cfg(cfg)
+    log(f"  첨부 순서: {', '.join(attach_ids)}")
 
     success_count = 0
-    for attach_id in _REQUIRED_ATTACH_IDS:
+    for attach_id in attach_ids:
         log(f"  → [{attach_id}] 처리 시작")
         _handle_attach_with_retries(driver, wait, attach_id, file_path, log, max_retries=3)
         success_count += 1
 
-    log(f"  ✓ 첨부 완료 슬롯 수: {success_count}/{len(_REQUIRED_ATTACH_IDS)}")
+    log(f"  ✓ 첨부 완료 슬롯 수: {success_count}/{len(attach_ids)}")
 
     log("  → 지원신청 버튼 클릭 중...")
     _drain_alerts(driver, log, "지원신청 전", timeout=0.5)
