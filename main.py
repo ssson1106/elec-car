@@ -36,6 +36,7 @@ class RowFrame(ctk.CTkFrame):
 
         self.env_var = tk.StringVar()
         self.file1_var = tk.StringVar()
+        self.security_popup_only_var = tk.BooleanVar(value=False)
         self._status_var = tk.StringVar(value="대기")
         self._driver_holder = None
         self._active_thread = None
@@ -48,6 +49,19 @@ class RowFrame(ctk.CTkFrame):
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.grid(row=0, column=0, padx=8, pady=(6, 3), sticky="ew")
         header.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkCheckBox(
+            self,
+            text="보안코드까지만",
+            variable=self.security_popup_only_var,
+            height=20,
+            checkbox_width=16,
+            checkbox_height=16,
+            fg_color="#2563eb",
+            hover_color="#1d4ed8",
+            text_color="#334155",
+            font=ctk.CTkFont(family="Malgun Gothic", size=11),
+        ).grid(row=4, column=0, padx=8, pady=(0, 2), sticky="w")
 
         ctk.CTkLabel(
             header,
@@ -85,7 +99,7 @@ class RowFrame(ctk.CTkFrame):
 
         actions = ctk.CTkFrame(self, fg_color="transparent")
         actions.grid(row=3, column=0, padx=8, pady=(2, 4), sticky="ew")
-        actions.grid_columnconfigure((0, 1, 2), weight=1, uniform="actions")
+        actions.grid_columnconfigure((0, 1, 2, 3), weight=1, uniform="actions")
 
         ctk.CTkButton(
             actions,
@@ -105,6 +119,15 @@ class RowFrame(ctk.CTkFrame):
             font=ctk.CTkFont(family="Malgun Gothic", size=11),
             command=self._run,
         ).grid(row=0, column=1, padx=3, sticky="ew")
+        ctk.CTkButton(
+            actions,
+            text="정지",
+            height=26,
+            fg_color="#ef4444",
+            hover_color="#dc2626",
+            font=ctk.CTkFont(family="Malgun Gothic", size=11),
+            command=self._stop,
+        ).grid(row=0, column=2, padx=3, sticky="ew")
         self.remove_btn = ctk.CTkButton(
             actions,
             text="삭제",
@@ -114,18 +137,18 @@ class RowFrame(ctk.CTkFrame):
             text_color="#be123c",
             font=ctk.CTkFont(family="Malgun Gothic", size=11),
         )
-        self.remove_btn.grid(row=0, column=2, padx=(3, 0), sticky="ew")
+        self.remove_btn.grid(row=0, column=3, padx=(3, 0), sticky="ew")
 
         ctk.CTkLabel(
             self,
             text="최근 로그",
             text_color="#64748b",
             font=ctk.CTkFont(family="Malgun Gothic", size=11, weight="bold"),
-        ).grid(row=4, column=0, padx=8, pady=(2, 2), sticky="w")
+        ).grid(row=5, column=0, padx=8, pady=(0, 2), sticky="w")
 
         self.mini_log = ctk.CTkTextbox(
             self,
-            height=72,
+            height=50,
             wrap="word",
             fg_color="#f8fafc",
             text_color="#334155",
@@ -134,7 +157,7 @@ class RowFrame(ctk.CTkFrame):
             corner_radius=6,
             font=ctk.CTkFont(family="Malgun Gothic", size=11),
         )
-        self.mini_log.grid(row=5, column=0, padx=8, pady=(0, 8), sticky="ew")
+        self.mini_log.grid(row=6, column=0, padx=8, pady=(0, 8), sticky="ew")
         self.mini_log.configure(state=tk.DISABLED)
 
     def _make_picker_row(self, row, label, variable, placeholder, command):
@@ -248,6 +271,23 @@ class RowFrame(ctk.CTkFrame):
         except Exception as e:
             self._log(f"Chrome 열기 실패: {e}")
 
+    def _stop(self):
+        self._select_card()
+        if not (self._active_thread and self._active_thread.is_alive()):
+            self._log("정지할 실행 작업이 없습니다.")
+            return
+
+        driver = self._driver_holder.get("driver") if self._driver_holder else None
+        if driver:
+            try:
+                driver.quit()
+                self._log("정지 요청: ChromeDriver 연결을 종료했습니다.")
+            except Exception as e:
+                self._log(f"정지 요청 중 오류: {e}")
+        else:
+            self._log("정지 요청: 아직 ChromeDriver 연결 전입니다.")
+        self._set_status("정지", "#fee2e2", "#991b1b")
+
     def _run(self):
         self._select_card()
         path = self.env_var.get().strip()
@@ -263,6 +303,8 @@ class RowFrame(ctk.CTkFrame):
             self._log(f"FILE1 파일 없음: {file1_path}")
             return
 
+        stop_at_security_popup = self.security_popup_only_var.get()
+
         if self._active_thread and self._active_thread.is_alive():
             if self._driver_holder and self._driver_holder.get("driver"):
                 try:
@@ -277,7 +319,14 @@ class RowFrame(ctk.CTkFrame):
 
         def _task():
             try:
-                run_all(path, self.port, self._log, file1_path=file1_path or None, driver_holder=driver_holder)
+                run_all(
+                    path,
+                    self.port,
+                    self._log,
+                    file1_path=file1_path or None,
+                    driver_holder=driver_holder,
+                    stop_at_security_popup=stop_at_security_popup,
+                )
                 if self._driver_holder is driver_holder:
                     self.after(0, lambda: self._set_status("완료", "#dcfce7", "#166534"))
             except Exception as e:

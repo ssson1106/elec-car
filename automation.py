@@ -687,23 +687,18 @@ def open_chrome(port, login_id=DEFAULT_LOGIN_ID):
 # ──────────────────────────────────────────
 
 def _validate_cfg(cfg, log):
-    missing = []
-    for key, label, example in _REQUIRED_FIELDS:
+    empty = []
+    for key, label, _example in _REQUIRED_FIELDS:
         if not cfg.get(key, "").strip():
-            missing.append((key, label, example))
+            empty.append((key, label))
 
-    if missing:
+    if empty:
         log("┌" + "─" * 50)
-        log("│ ❌  env 파일에 필수 항목이 없습니다")
+        log("│ ⚠  env 파일에 빈 항목이 있어 해당 입력은 건너뜁니다")
         log("│")
-        log("│  누락된 항목 목록:")
-        for key, label, example in missing:
+        for key, label in empty:
             log(f"│     • {key}  ({label})")
-            log(f"│       예시: {key}={example}")
-        log("│")
-        log("│  ▶ env 파일을 열어서 위 항목을 채워주세요")
         log("└" + "─" * 50)
-        raise ValueError(f"env 누락 항목: {[k for k, _, _ in missing]}")
 
     # 첨부파일 존재 여부
     file1 = cfg.get("FILE1", "")
@@ -978,7 +973,12 @@ def _switch_to_form_window(driver, log, preferred_handle=None):
 def _safe_select(driver, el_id, value, field_label, env_key, log):
     """드롭다운 선택 — 항목 없으면 가독성 있는 오류 출력."""
     try:
-        Select(driver.find_element(By.ID, el_id)).select_by_visible_text(value)
+        select = Select(driver.find_element(By.ID, el_id))
+        value = _select_alias(el_id, value)
+        try:
+            select.select_by_visible_text(value)
+        except NoSuchElementException:
+            select.select_by_value(value)
     except NoSuchElementException:
         _err_box(
             log,
@@ -1051,7 +1051,433 @@ def _safe_input(driver, wait, el_id, value, field_label, log):
         raise
 
 
-def _run_form(driver, wait, cfg, log):
+def _select_alias(el_id, value):
+    value = (value or "").strip()
+    aliases = {
+        "req_kind": {
+            "개인": "P",
+            "P": "P",
+            "개인사업자": "B",
+            "B": "B",
+            "단체": "G",
+            "G": "G",
+        },
+    }
+    return aliases.get(el_id, {}).get(value, value)
+
+
+def _cfg_text(cfg, key):
+    return (cfg.get(key) or "").strip()
+
+
+def _cfg_text_any(cfg, *keys):
+    for key in keys:
+        value = _cfg_text(cfg, key)
+        if value:
+            return value
+    return ""
+
+
+def _skip_empty(log, field_label, env_key):
+    log(f"  ⏭ [{field_label}] env {env_key} 값이 비어 있어 건너뜀")
+
+
+def _maybe_select(driver, el_id, value, field_label, env_key, log):
+    value = (value or "").strip()
+    if not value:
+        _skip_empty(log, field_label, env_key)
+        return False
+    log(f"  → [{field_label}] '{value}' 선택 중...")
+    _safe_select(driver, el_id, value, field_label, env_key, log)
+    _trigger_change(driver, el_id)
+    log(f"  ✓ [{field_label}] 완료")
+    return True
+
+
+def _maybe_input(driver, wait, el_id, value, field_label, env_key, log):
+    value = (value or "").strip()
+    if not value:
+        _skip_empty(log, field_label, env_key)
+        return False
+    log(f"  → [{field_label}] {value} 입력 중...")
+    _safe_input(driver, wait, el_id, value, field_label, log)
+    log(f"  ✓ [{field_label}] 완료")
+    return True
+
+
+def _maybe_js_set(driver, el_id, value, field_label, env_key, log):
+    value = (value or "").strip()
+    if not value:
+        _skip_empty(log, field_label, env_key)
+        return False
+    try:
+        driver.find_element(By.ID, el_id)
+    except NoSuchElementException:
+        log(f"  ⏭ [{field_label}] id='{el_id}' 요소가 없어 건너뜀")
+        return False
+    log(f"  → [{field_label}] {value} 입력 중...")
+    driver.execute_script(
+        """
+        const el = document.getElementById(arguments[0]);
+        el.removeAttribute('readonly');
+        el.value = arguments[1];
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+        el.dispatchEvent(new Event('change', {bubbles: true}));
+        """,
+        el_id,
+        value,
+    )
+    log(f"  ✓ [{field_label}] 완료")
+    return True
+
+
+def _select_radio_by_name_value(driver, wait, name, value, field_label, log):
+    locator = (By.CSS_SELECTOR, f"input[type='radio'][name='{name}'][value='{value}']")
+    el = wait.until(EC.presence_of_element_located(locator))
+    driver.execute_script(
+        """
+        const el = arguments[0];
+        el.scrollIntoView({block:'center', inline:'nearest'});
+        el.disabled = false;
+        el.removeAttribute('disabled');
+        el.checked = true;
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+        el.dispatchEvent(new Event('change', {bubbles: true}));
+        """,
+        el,
+    )
+    log(f"  ✓ [{field_label}] '{value}' 선택 완료")
+
+
+def _radio_value_alias(name, value):
+    value = (value or "").strip()
+    aliases = {
+        "req_sex": {
+            "남자": "M",
+            "남": "M",
+            "M": "M",
+            "여자": "F",
+            "여": "F",
+            "F": "F",
+        },
+        "priority_type": {
+            "우선순위": "10",
+            "10": "10",
+            "법인·기관": "20",
+            "법인기관": "20",
+            "20": "20",
+            "중소기업": "30",
+            "30": "30",
+            "일반": "00",
+            "00": "00",
+            "택시": "40",
+            "40": "40",
+            "택배": "50",
+            "50": "50",
+        },
+    }
+    return aliases.get(name, {}).get(value, value)
+
+
+def _maybe_radio(driver, wait, name, value, field_label, env_key, log):
+    value = _radio_value_alias(name, value)
+    if not value:
+        _skip_empty(log, field_label, env_key)
+        return False
+    log(f"  → [{field_label}] '{value}' 선택 중...")
+    _select_radio_by_name_value(driver, wait, name, value, field_label, log)
+    return True
+
+
+def _maybe_radio_optional(driver, wait, name, value, field_label, env_key, log):
+    try:
+        return _maybe_radio(driver, wait, name, value, field_label, env_key, log)
+    except TimeoutException:
+        _warn_box(
+            log,
+            f"[{field_label}] 라디오 선택 건너뜀",
+            f"name='{name}' / env {env_key}='{value}' 요소를 찾지 못했습니다",
+        )
+        return False
+    except NoSuchElementException:
+        _warn_box(
+            log,
+            f"[{field_label}] 라디오 선택 건너뜀",
+            f"name='{name}' / env {env_key}='{value}' 요소를 찾지 못했습니다",
+        )
+        return False
+
+
+def _priority_radio_id(value):
+    return {
+        "10": "priority_type1",
+        "20": "priority_type2",
+        "30": "priority_type3",
+        "00": "priority_type4",
+        "40": "priority_type5",
+        "50": "priority_type6",
+    }.get(value)
+
+
+def _maybe_priority_radio(driver, wait, value, log):
+    value = _radio_value_alias("priority_type", value)
+    if not value:
+        _skip_empty(log, "우선순위 배정집행", "PRIORITY_TYPE")
+        return False
+
+    radio_id = _priority_radio_id(value)
+    if not radio_id:
+        return _maybe_radio_optional(
+            driver, wait, "priority_type", value, "우선순위 배정집행", "PRIORITY_TYPE", log
+        )
+
+    try:
+        log(f"  → [우선순위 배정집행] '{value}' 선택 중...")
+        el = wait.until(EC.presence_of_element_located((By.ID, radio_id)))
+        driver.execute_script(
+            """
+            const el = arguments[0];
+            el.scrollIntoView({block:'center', inline:'nearest'});
+            el.disabled = false;
+            el.removeAttribute('disabled');
+            el.checked = true;
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new Event('change', {bubbles: true}));
+            """,
+            el,
+        )
+        if driver.execute_script("return arguments[0].checked === true;", el):
+            log(f"  ✓ [우선순위 배정집행] id='{radio_id}' 선택 완료")
+            return True
+    except Exception as e:
+        _warn_box(log, "[우선순위 배정집행] 선택 실패", _short_error(e))
+    return False
+
+
+def _set_value_in_scope(driver, scope, selector, value, field_label, log):
+    value = (value or "").strip()
+    if not value:
+        log(f"  ⏭ [{field_label}] 값이 비어 있어 건너뜀")
+        return False
+
+    el = scope.find_element(By.CSS_SELECTOR, selector)
+    driver.execute_script(
+        """
+        const el = arguments[0];
+        const value = arguments[1];
+        el.scrollIntoView({block:'center', inline:'nearest'});
+        el.removeAttribute('readonly');
+        el.value = value;
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+        el.dispatchEvent(new Event('change', {bubbles: true}));
+        """,
+        el,
+        value,
+    )
+    log(f"  ✓ [{field_label}] 입력 완료: {value}")
+    return True
+
+
+def _select_in_scope(scope, selector, value, field_label, log):
+    value = (value or "").strip()
+    if not value:
+        log(f"  ⏭ [{field_label}] 값이 비어 있어 건너뜀")
+        return False
+
+    select = Select(scope.find_element(By.CSS_SELECTOR, selector))
+    try:
+        select.select_by_visible_text(value)
+    except NoSuchElementException:
+        select.select_by_value(value)
+    log(f"  ✓ [{field_label}] 선택 완료: {value}")
+    return True
+
+
+def _field_value(driver, el_id):
+    try:
+        el = driver.find_element(By.ID, el_id)
+        return (el.get_attribute("value") or "").strip()
+    except Exception:
+        return ""
+
+
+def _wait_for_field_value(driver, el_id, timeout=5):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        value = _field_value(driver, el_id)
+        if value:
+            return value
+        time.sleep(0.25)
+    return _field_value(driver, el_id)
+
+
+def _trigger_change(driver, el_id):
+    driver.execute_script(
+        """
+        const el = document.getElementById(arguments[0]);
+        if (!el) return;
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+        el.dispatchEvent(new Event('change', {bubbles: true}));
+        """,
+        el_id,
+    )
+
+
+def _fill_car_model_and_count_with_amount_retry(driver, wait, cfg, log, max_attempts=3):
+    model = _cfg_text(cfg, "CAR_MODEL")
+    count = _cfg_text(cfg, "CAR_COUNT")
+
+    if not model:
+        _skip_empty(log, "차종", "CAR_MODEL")
+        return
+    if not count:
+        _skip_empty(log, "신청대수", "CAR_COUNT")
+        return
+
+    for attempt in range(1, max_attempts + 1):
+        suffix = "" if attempt == 1 else f" (재시도 {attempt - 1}/{max_attempts - 1})"
+
+        log(f"  → [차종] '{model}' 선택 중...{suffix}")
+        _safe_select(driver, "model_cd", model, "차종", "CAR_MODEL", log)
+        _trigger_change(driver, "model_cd")
+        log(f"  ✓ [차종] 완료")
+
+        log(f"  → [신청대수] {count}대 입력 중...{suffix}")
+        _safe_input(driver, wait, "req_cnt", count, "신청대수", log)
+        _trigger_change(driver, "req_cnt")
+        log(f"  ✓ [신청대수] 완료")
+
+        _wait_for_page_idle(driver, log, "보조금신청금액 계산 대기", timeout=5)
+        amount = _wait_for_field_value(driver, "req_total_amt_1", timeout=4)
+        if amount:
+            log(f"  ✓ [보조금신청금액] 자동 입력 확인: {amount}")
+            return
+
+        if attempt < max_attempts:
+            _warn_box(
+                log,
+                "보조금신청금액 확인",
+                "값이 비어 있어 차종/신청대수를 다시 입력합니다",
+            )
+
+    _err_box(
+        log,
+        "[보조금신청금액] 자동 입력 실패",
+        "차종 선택과 신청대수 입력 후에도 req_total_amt_1 값이 비어 있습니다",
+        [
+            "사이트에서 차종/신청대수 변경 후 금액이 자동 계산되는지 화면을 확인하세요",
+            "신청유형 또는 차종 조건에 따라 금액 계산이 막힌 상태인지 확인하세요",
+        ],
+    )
+    _log_debug_context(log, driver, "[보조금신청금액] 자동 입력 실패")
+    raise RuntimeError("보조금신청금액 자동 입력 실패")
+
+
+def _handle_social_options(driver, wait, cfg, log):
+    social_yn = _cfg_text(cfg, "SOCIAL_YN")
+    social_kind = _cfg_text(cfg, "SOCIAL_KIND")
+    children_cnt = _cfg_text(cfg, "CHILDREN_CNT")
+
+    if not social_yn and (social_kind or children_cnt):
+        social_yn = "Y"
+
+    if social_yn:
+        log(f"  → [사회계층여부] '{social_yn}' 선택 중...")
+        _select_radio_by_name_value(driver, wait, "social_yn", social_yn, "사회계층여부", log)
+        _wait_for_page_idle(driver, log, "사회계층여부 선택 후", timeout=3)
+    else:
+        _skip_empty(log, "사회계층여부", "SOCIAL_YN")
+
+    _maybe_select(driver, "social_kind", social_kind, "사회계층유형", "SOCIAL_KIND", log)
+    _maybe_select(driver, "children_cnt", children_cnt, "자녀수", "CHILDREN_CNT", log)
+
+
+def _fill_applicant_identity(driver, wait, cfg, log):
+    app_type = _select_alias("req_kind", _cfg_text(cfg, "APPLICATION_TYPE"))
+    name = _cfg_text(cfg, "NAME")
+    org_name = _cfg_text(cfg, "ORG_NAME")
+
+    if app_type == "P":
+        _maybe_input(driver, wait, "req_nm", name or org_name, "성명", "NAME", log)
+        birth_date = _cfg_text(cfg, "BIRTH_DATE")
+        if _maybe_js_set(driver, "birth1", birth_date, "생년월일", "BIRTH_DATE", log):
+            _maybe_js_set(driver, "birth", birth_date, "생년월일 hidden", "BIRTH_DATE", log)
+        _maybe_radio(driver, wait, "req_sex", _cfg_text(cfg, "GENDER"), "성별", "GENDER", log)
+        return
+
+    _maybe_input(driver, wait, "req_nm", org_name or name, "기관명", "ORG_NAME", log)
+
+
+def _handle_exchange_3year(driver, wait, cfg, log):
+    exchange_yn = _cfg_text(cfg, "EXCHANGE_3YEAR_YN") or _cfg_text(cfg, "exchange_3year_yn")
+    if not exchange_yn:
+        _skip_empty(log, "전환지원금", "EXCHANGE_3YEAR_YN")
+        return
+
+    exchange_yn = exchange_yn.upper()
+    log(f"  → [전환지원금] '{exchange_yn}' 선택 중...")
+    _select_radio_by_name_value(driver, wait, "exchange_3year_yn", exchange_yn, "전환지원금", log)
+    _wait_for_page_idle(driver, log, "전환지원금 선택 후", timeout=3)
+
+    if exchange_yn != "Y":
+        log("  ✓ [전환지원금] N 선택, 폐차 정보 입력 건너뜀")
+        return
+
+    count = _cfg_text(cfg, "EXCHANGE_3YEAR_CNT") or _cfg_text(cfg, "exchange_3year_cnt") or "1"
+    log(f"  → [전환지원금 폐차대수] {count} 입력 중...")
+    _safe_input(driver, wait, "exchange_3year_cnt", count, "전환지원금 폐차대수", log)
+
+    _click_element(
+        driver,
+        wait,
+        (By.XPATH, "//button[contains(@onclick, 'create3yearNewCarInfo')]"),
+        "전환지원금 폐차대수 확인 버튼 클릭 실패",
+        log,
+    )
+    log("  ✓ [전환지원금] 폐차 정보 입력 영역 생성")
+
+    row = wait.until(
+        EC.presence_of_element_located(
+            (By.CSS_SELECTOR, "#exchangeCar3yearIBody tr.c_ex_carinfo3year")
+        )
+    )
+
+    _set_value_in_scope(driver, row, ".c_bf_owner_nm", _cfg_text(cfg, "BF_OWNER_NM"), "직전 소유주", log)
+    _set_value_in_scope(driver, row, ".c_exchg_delivery_day", _cfg_text(cfg, "EXCHG_DELIVERY_DAY"), "차량 최초 등록일", log)
+    _set_value_in_scope(driver, row, ".c_own_start_dt", _cfg_text(cfg, "OWN_START_DT"), "소유기간시작일", log)
+    _set_value_in_scope(driver, row, ".c_own_end_dt", _cfg_text(cfg, "OWN_END_DT"), "소유기간종료일", log)
+    _select_in_scope(row, ".c_fuel", _cfg_text(cfg, "FUEL"), "유종", log)
+    _set_value_in_scope(driver, row, ".c_exchg_vh_num", _cfg_text(cfg, "EXCHG_VH_NUM"), "차량번호", log)
+    log("  ✅ [전환지원금] 폐차 정보 입력 완료")
+
+
+def _handle_priority_and_lease_options(driver, wait, cfg, log):
+    priority_type = _cfg_text(cfg, "PRIORITY_TYPE")
+    ls_user_yn = _cfg_text_any(cfg, "LS_USER_YN", "ls_user_yn")
+    ls_user_nm_chk = _cfg_text_any(cfg, "LS_USER_NM_CHK", "ls_user_nm_chk")
+
+    _maybe_priority_radio(driver, wait, priority_type, log)
+    _maybe_radio_optional(
+        driver,
+        wait,
+        "ls_user_yn",
+        ls_user_yn,
+        "리스렌탈이용여부",
+        "LS_USER_YN",
+        log,
+    )
+    _maybe_radio_optional(
+        driver,
+        wait,
+        "ls_user_nm_chk",
+        ls_user_nm_chk,
+        "이용자명의 리스렌탈 여부",
+        "LS_USER_NM_CHK",
+        log,
+    )
+
+
+def _run_form(driver, wait, cfg, log, stop_at_security_popup=False):
     log("━━━ [1단계] 신청서 작성 시작 ━━━")
 
     current_url = driver.current_url
@@ -1080,200 +1506,164 @@ def _run_form(driver, wait, cfg, log):
     log("  ✓ 신청서 페이지 확인 완료")
 
     # 신청유형
-    val = cfg["APPLICATION_TYPE"]
-    log(f"  → [신청유형] '{val}' 선택 중...")
-    _safe_select(driver, "req_kind", val, "신청유형", "APPLICATION_TYPE", log)
-    _wait_for_page_idle(driver, log, "신청유형 선택 후", timeout=5)
-    log(f"  ✓ [신청유형] 완료")
+    if _maybe_select(driver, "req_kind", _cfg_text(cfg, "APPLICATION_TYPE"), "신청유형", "APPLICATION_TYPE", log):
+        _wait_for_page_idle(driver, log, "신청유형 선택 후", timeout=5)
 
     # 계약일자
-    val = cfg["CONTRACT_DAY"]
-    log(f"  → [계약일자] {val} 입력 중...")
-    driver.execute_script(f"document.getElementById('contract_day').value = '{val}';")
-    log(f"  ✓ [계약일자] 완료")
+    _maybe_js_set(driver, "contract_day", _cfg_text(cfg, "CONTRACT_DAY"), "계약일자", "CONTRACT_DAY", log)
 
-    # 차종
-    val = cfg["CAR_MODEL"]
-    log(f"  → [차종] '{val}' 선택 중...")
-    _safe_select(driver, "model_cd", val, "차종", "CAR_MODEL", log)
-    log(f"  ✓ [차종] 완료")
-
-    # 신청대수
-    val = cfg.get("CAR_COUNT", "1")
-    log(f"  → [신청대수] {val}대 입력 중...")
-    _safe_input(driver, wait, "req_cnt", val, "신청대수", log)
-    log(f"  ✓ [신청대수] 완료")
+    # 차종 / 신청대수 / 보조금신청금액
+    _fill_car_model_and_count_with_amount_retry(driver, wait, cfg, log)
 
     # 출고예정일
-    val = cfg["DELIVERY_DATE"]
-    log(f"  → [출고예정일] {val} 입력 중...")
-    driver.execute_script(f"document.getElementById('delivery_sch_day').value = '{val}';")
-    log(f"  ✓ [출고예정일] 완료")
+    _maybe_js_set(driver, "delivery_sch_day", _cfg_text(cfg, "DELIVERY_DATE"), "출고예정일", "DELIVERY_DATE", log)
 
     # 연락처
-    log(f"  → [전화번호] {cfg['PHONE']} 입력 중...")
-    _safe_input(driver, wait, "phone", cfg["PHONE"], "전화번호", log)
-    log(f"  ✓ [전화번호] 완료")
+    _maybe_input(driver, wait, "phone", _cfg_text(cfg, "PHONE"), "전화번호", "PHONE", log)
 
-    log(f"  → [휴대폰] {cfg['MOBILE']} 입력 중...")
-    _safe_input(driver, wait, "mobile", cfg["MOBILE"], "휴대폰", log)
-    log(f"  ✓ [휴대폰] 완료")
+    _maybe_input(driver, wait, "mobile", _cfg_text(cfg, "MOBILE"), "휴대폰", "MOBILE", log)
 
-    email = cfg.get("EMAIL", "")
-    log(f"  → [이메일] {email} 입력 중...")
-    _safe_input(driver, wait, "email", email, "이메일", log)
-    log(f"  ✓ [이메일] 완료")
+    _maybe_input(driver, wait, "email", _cfg_text(cfg, "EMAIL"), "이메일", "EMAIL", log)
 
-    # 기관 정보
-    log(f"  → [기관명] {cfg['ORG_NAME']} 입력 중...")
-    _safe_input(driver, wait, "req_nm", cfg["ORG_NAME"], "기관명", log)
-    log(f"  ✓ [기관명] 완료")
+    # 신청인 / 기관 정보
+    _fill_applicant_identity(driver, wait, cfg, log)
 
-    val = cfg["APP_GUBUN"]
-    log(f"  → [신청구분] '{val}' 선택 중...")
-    _safe_select(driver, "grp_reqst_se", val, "신청구분", "APP_GUBUN", log)
-    log(f"  ✓ [신청구분] 완료")
+    _maybe_select(driver, "grp_reqst_se", _cfg_text(cfg, "APP_GUBUN"), "신청구분", "APP_GUBUN", log)
 
-    log(f"  → [대표자] {cfg['NAME']} 입력 중...")
-    _safe_input(driver, wait, "ceo", cfg["NAME"], "대표자", log)
-    log(f"  ✓ [대표자] 완료")
+    _maybe_input(driver, wait, "ceo", _cfg_text(cfg, "NAME"), "대표자", "NAME", log)
 
-    log(f"  → [법인번호] {cfg['B_NUM']} 입력 중...")
-    _safe_input(driver, wait, "birth2", cfg["B_NUM"], "법인번호", log)
-    log(f"  ✓ [법인번호] 완료")
+    _maybe_input(driver, wait, "birth2", _cfg_text(cfg, "B_NUM"), "법인번호", "B_NUM", log)
 
-    log(f"  → [사업자번호] {cfg['S_NUM']} 입력 중...")
-    _safe_input(driver, wait, "busi_no", cfg["S_NUM"], "사업자번호", log)
-    log(f"  ✓ [사업자번호] 완료")
+    _maybe_input(driver, wait, "busi_no", _cfg_text(cfg, "S_NUM"), "사업자번호", "S_NUM", log)
 
-    log(f"  → [개인사업장명] {cfg['ORG_NAME']} 입력 중...")
-    _safe_input(driver, wait, "pri_busi_nm", cfg["ORG_NAME"], "개인사업장명", log)
-    log(f"  ✓ [개인사업장명] 완료")
+    _maybe_input(driver, wait, "pri_busi_nm", _cfg_text(cfg, "ORG_NAME"), "개인사업장명", "ORG_NAME", log)
 
-    log(f"  → [대리점연락처] {cfg['AGENCY_PHONE']} 입력 중...")
-    _safe_input(driver, wait, "seller_phone", cfg["AGENCY_PHONE"], "대리점연락처", log)
-    log(f"  ✓ [대리점연락처] 완료")
+    _maybe_input(driver, wait, "seller_phone", _cfg_text(cfg, "AGENCY_PHONE"), "대리점연락처", "AGENCY_PHONE", log)
 
-    log(f"  → [담당자명] {cfg['CONTACT_NAME']} 입력 중...")
-    _safe_input(driver, wait, "contact_nm", cfg["CONTACT_NAME"], "담당자명", log)
-    log(f"  ✓ [담당자명] 완료")
+    _handle_exchange_3year(driver, wait, cfg, log)
 
-    log(f"  → [담당자연락처] {cfg['CONTACT_MOBILE']} 입력 중...")
-    _safe_input(driver, wait, "contact_mobile", cfg["CONTACT_MOBILE"], "담당자연락처", log)
-    log(f"  ✓ [담당자연락처] 완료")
+    _handle_priority_and_lease_options(driver, wait, cfg, log)
 
-    log(f"  → [제조수입사관리번호] {cfg['MANUFACTURER_ID']} 입력 중...")
-    _safe_input(driver, wait, "seller_mgrid", cfg["MANUFACTURER_ID"], "제조수입사관리번호", log)
-    log(f"  ✓ [제조수입사관리번호] 완료")
+    _maybe_input(driver, wait, "contact_nm", _cfg_text(cfg, "CONTACT_NAME"), "담당자명", "CONTACT_NAME", log)
+
+    _maybe_input(driver, wait, "contact_mobile", _cfg_text(cfg, "CONTACT_MOBILE"), "담당자연락처", "CONTACT_MOBILE", log)
+
+    _maybe_input(driver, wait, "seller_mgrid", _cfg_text(cfg, "MANUFACTURER_ID"), "제조수입사관리번호", "MANUFACTURER_ID", log)
+
+    _handle_social_options(driver, wait, cfg, log)
+    _maybe_priority_radio(driver, wait, _cfg_text(cfg, "PRIORITY_TYPE"), log)
 
     # 주소 팝업
-    log(f"  → [주소] 팝업 열기 (검색어: {cfg['ADDRESS']})")
-    parent2 = driver.current_window_handle
-    before2 = set(driver.window_handles)
-    try:
+    address = _cfg_text(cfg, "ADDRESS")
+    if not address:
+        _skip_empty(log, "주소", "ADDRESS")
+    else:
+        log(f"  → [주소] 팝업 열기 (검색어: {address})")
+        parent2 = driver.current_window_handle
+        before2 = set(driver.window_handles)
+        try:
+            _click_element(
+                driver,
+                wait,
+                (
+                    By.XPATH,
+                    "//*[@onclick and contains(@onclick, '/ev_ps/addrlink/addrPopup')]",
+                ),
+                "주소 팝업 버튼 클릭 실패",
+                log,
+            )
+        except TimeoutException:
+            _err_box(
+                log,
+                "주소 팝업 버튼을 찾을 수 없음",
+                "주소 검색 버튼이 페이지에 나타나지 않았습니다",
+                [
+                    "신청서 페이지가 올바르게 로드됐는지 확인하세요",
+                    "로그인 세션이 유지 중인지 확인하세요",
+                ],
+            )
+            raise
+
+        def _find_addr_popup(d):
+            for h in d.window_handles:
+                if h in before2:
+                    continue
+                try:
+                    d.switch_to.window(h)
+                    if d.find_elements(By.ID, "keyword"):
+                        return h
+                except Exception:
+                    continue
+            return False
+
+        try:
+            child2 = wait.until(_find_addr_popup)
+        except TimeoutException:
+            _err_box(
+                log, "주소 팝업이 열리지 않음",
+                "팝업 창이 10초 내에 열리지 않았습니다",
+                ["브라우저 팝업 차단 설정을 해제하세요"],
+            )
+            raise
+        driver.switch_to.window(child2)
+        log("  ✓ 주소 팝업 열림")
+
+        _safe_input(driver, wait, "keyword", address, "주소 검색어", log)
+        log(f"  → 검색어 '{address}' 입력 후 검색 클릭")
+
         _click_element(
             driver,
             wait,
-            (
-                By.XPATH,
-                "//*[@onclick and contains(@onclick, '/ev_ps/addrlink/addrPopup')]",
-            ),
-            "주소 팝업 버튼 클릭 실패",
+            (By.XPATH, "//button[contains(@onclick, 'searchUrlJuso')]"),
+            "주소 검색 버튼 클릭 실패",
             log,
         )
-    except TimeoutException:
-        _err_box(
-            log,
-            "주소 팝업 버튼을 찾을 수 없음",
-            "주소 검색 버튼이 페이지에 나타나지 않았습니다",
-            [
-                "신청서 페이지가 올바르게 로드됐는지 확인하세요",
-                "로그인 세션이 유지 중인지 확인하세요",
-            ],
-        )
-        raise
 
-    def _find_addr_popup(d):
-        for h in d.window_handles:
-            if h in before2:
-                continue
-            try:
-                d.switch_to.window(h)
-                if d.find_elements(By.ID, "keyword"):
-                    return h
-            except Exception:
-                continue
-        return False
-
-    try:
-        child2 = wait.until(_find_addr_popup)
-    except TimeoutException:
-        _err_box(
-            log, "주소 팝업이 열리지 않음",
-            "팝업 창이 10초 내에 열리지 않았습니다",
-            ["브라우저 팝업 차단 설정을 해제하세요"],
-        )
-        raise
-    driver.switch_to.window(child2)
-    log("  ✓ 주소 팝업 열림")
-
-    _safe_input(driver, wait, "keyword", cfg["ADDRESS"], "주소 검색어", log)
-    log(f"  → 검색어 '{cfg['ADDRESS']}' 입력 후 검색 클릭")
-
-    _click_element(
-        driver,
-        wait,
-        (By.XPATH, "//button[contains(@onclick, 'searchUrlJuso')]"),
-        "주소 검색 버튼 클릭 실패",
-        log,
-    )
-
-    try:
-        wait.until(
-            lambda d: len(
-                d.find_elements(By.XPATH, "//a[contains(@href, \"setMaping('1')\")]")
-            ) > 0
-        )
-    except TimeoutException:
-        _err_box(
-            log,
-            "주소 검색 결과 없음",
-            f"'{cfg['ADDRESS']}' 로 검색했으나 결과가 없습니다",
-            [
-                "env 파일의 ADDRESS 값을 더 짧게 입력해 보세요",
-                "예: '황탄리길 85-45' → '황탄리길'",
-                "도로명·지번 형식이 맞는지 확인하세요",
-            ],
-        )
-        raise
-
-    log("  ✓ 주소 검색 결과 확인, 첫 번째 항목 선택 중...")
-    for _ in range(3):
         try:
-            a = driver.find_element(
-                By.XPATH, "//a[contains(@href, \"setMaping('1')\")]"
+            wait.until(
+                lambda d: len(
+                    d.find_elements(By.XPATH, "//a[contains(@href, \"setMaping('1')\")]")
+                ) > 0
             )
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", a)
-            driver.execute_script("arguments[0].click();", a)
-            break
-        except StaleElementReferenceException:
-            time.sleep(0.3)
+        except TimeoutException:
+            _err_box(
+                log,
+                "주소 검색 결과 없음",
+                f"'{address}' 로 검색했으나 결과가 없습니다",
+                [
+                    "env 파일의 ADDRESS 값을 더 짧게 입력해 보세요",
+                    "예: '황탄리길 85-45' → '황탄리길'",
+                    "도로명·지번 형식이 맞는지 확인하세요",
+                ],
+            )
+            raise
 
-    time.sleep(0.1)
-    addr2 = cfg.get("ADDRESS2", "")
-    log(f"  → 상세주소 '{addr2}' 입력 중...")
-    _safe_input(driver, wait, "rtAddrDetail", addr2, "상세주소", log)
+        log("  ✓ 주소 검색 결과 확인, 첫 번째 항목 선택 중...")
+        for _ in range(3):
+            try:
+                a = driver.find_element(
+                    By.XPATH, "//a[contains(@href, \"setMaping('1')\")]"
+                )
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", a)
+                driver.execute_script("arguments[0].click();", a)
+                break
+            except StaleElementReferenceException:
+                time.sleep(0.3)
 
-    _click_element(
-        driver,
-        wait,
-        (By.XPATH, "//button[contains(@onclick, 'setParent')]"),
-        "주소 확인 버튼 클릭 실패",
-        log,
-    )
-    log("  ✓ 주소 확인, 팝업 닫힘")
+        time.sleep(0.1)
+        addr2 = _cfg_text(cfg, "ADDRESS2")
+        _maybe_input(driver, wait, "rtAddrDetail", addr2, "상세주소", "ADDRESS2", log)
 
-    driver.switch_to.window(parent2)
+        _click_element(
+            driver,
+            wait,
+            (By.XPATH, "//button[contains(@onclick, 'setParent')]"),
+            "주소 확인 버튼 클릭 실패",
+            log,
+        )
+        log("  ✓ 주소 확인, 팝업 닫힘")
+
+        driver.switch_to.window(parent2)
 
     # 저장
     log("  → 저장(goSave) 버튼 클릭 중...")
@@ -1302,6 +1692,14 @@ def _run_form(driver, wait, cfg, log):
     handled, texts = _drain_alerts(driver, log, "임시저장", timeout=1.0, max_alerts=2)
     if not handled:
         log("  ✓ (goSave alert 없음)")
+
+    if stop_at_security_popup:
+        _handle_unexpected_alert(driver, log, "보안코드 테스트 진입 전")
+        _drain_alerts(driver, log, "보안코드 테스트 창 대기 전", timeout=0.2, max_alerts=5)
+        log("  → 테스트 모드: 보안코드 창까지만 대기 중...")
+        _switch_to_security_code_window(driver, wait, parent3, before3, log)
+        log("  ⏹ 테스트 모드: 보안코드 팝업 확인 후 여기서 중지합니다")
+        return False
 
     _solve_security_code(driver, wait, parent3, before3, log)
     log("✅ [1단계] 신청서 작성 완료")
@@ -1567,7 +1965,12 @@ def _handle_attach_with_retries(driver, wait, attach_id, file_path, log, max_ret
 
 def _run_attach(driver, wait, cfg, log):
     log("━━━ [2단계] 파일 첨부 및 지원신청 시작 ━━━")
-    file_path = cfg.get("FILE1", "")
+    file_path = _cfg_text(cfg, "FILE1")
+    if not file_path:
+        _skip_empty(log, "첨부파일", "FILE1")
+        log("  ⏭ 첨부 및 지원신청 단계를 건너뜁니다")
+        return
+
     log(f"  첨부 파일: {file_path}")
 
     _switch_to_form_window(driver, log)
@@ -1634,7 +2037,7 @@ def _run_attach(driver, wait, cfg, log):
 # 진입점
 # ──────────────────────────────────────────
 
-def run_all(env_path, port, log_cb, file1_path=None, driver_holder=None):
+def run_all(env_path, port, log_cb, file1_path=None, driver_holder=None, stop_at_security_popup=False):
     log_cb(f"env 파일 로드: {os.path.basename(env_path)}")
     cfg = dotenv_values(env_path)
     if file1_path:
@@ -1677,7 +2080,7 @@ def run_all(env_path, port, log_cb, file1_path=None, driver_holder=None):
     log_cb("")
 
     try:
-        should_continue = _run_form(driver, wait, cfg, log_cb)
+        should_continue = _run_form(driver, wait, cfg, log_cb, stop_at_security_popup=stop_at_security_popup)
         if not should_continue:
             return
         log_cb("")
@@ -1692,4 +2095,3 @@ def run_all(env_path, port, log_cb, file1_path=None, driver_holder=None):
         log_cb(f"  위의 위치/요소/화면 캡처/HTML 저장 로그를 확인하고 재시도하세요.")
         log_cb("─" * 52)
         raise
-
