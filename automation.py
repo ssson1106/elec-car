@@ -1,4 +1,5 @@
 ﻿import os
+import sys
 import time
 import shutil
 import base64
@@ -38,12 +39,14 @@ _CHROME_CANDIDATES = [
     ),
 ]
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
+_RUNTIME_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else _APP_DIR
 _APP_DATA_DIR = os.environ.get("LOCALAPPDATA") or _APP_DIR
 _CHROME_PROFILE_BASE = os.path.join(_APP_DATA_DIR, "elec-car", "chrome-debug")
 _DEBUG_DIR = os.path.join(_APP_DIR, "debug")
 
 LOGIN_URL = "https://ev.or.kr/nportal/login.do"
-FORM_URL = "https://ev.or.kr/ev_ps/ps/seller/sellerApplyform"
+FORM_URL = "https://ev.or.kr/ev_ps/ps/seller/sellerApplyform_new"
+START_URL = FORM_URL
 DEFAULT_LOGIN_ID = "D034726"
 
 # 필수 env 항목: (키, 표시명, 예시값)
@@ -91,7 +94,10 @@ def _warn_box(log, step, detail):
 
 
 def _short_error(e):
-    return str(e).splitlines()[0] if str(e) else repr(e)
+    text = str(e).strip()
+    if text and text != "Message:":
+        return text.splitlines()[0]
+    return f"{type(e).__name__}: {repr(e)}"
 
 
 def _describe_page(driver):
@@ -161,6 +167,34 @@ def _save_debug_snapshot(log, driver, step):
             log(f"  ↳ HTML 저장 실패: {_short_error(e)}")
     except Exception as e:
         log(f"  ↳ 디버그 스냅샷 저장 실패: {_short_error(e)}")
+
+
+def _wait_for_form_ready(driver, wait, log):
+    markers = [
+        (By.ID, "req_kind"),
+        (By.ID, "contract_day"),
+        (By.ID, "model_cd"),
+        (By.ID, "phone"),
+        (By.CSS_SELECTOR, "form input, form select, form textarea"),
+    ]
+    try:
+        wait.until(
+            lambda d: any(d.find_elements(*marker) for marker in markers)
+        )
+        return True
+    except TimeoutException:
+        _err_box(
+            log,
+            "신규 신청서 화면 렌더링 대기 실패",
+            "신청서 입력 항목이 10초 내에 나타나지 않았습니다",
+            [
+                "로그인 세션이 풀려 로그인/안내 화면으로 이동했는지 확인하세요",
+                "새 페이지가 스크립트로 늦게 그려지는 중이면 잠시 후 [실행]을 다시 눌러보세요",
+                "아래 저장된 HTML/캡처 파일을 보내주시면 변경된 필드 ID를 맞출 수 있습니다",
+            ],
+        )
+        _log_debug_context(log, driver, "신규 신청서 화면 렌더링 대기 실패")
+        raise
 
 
 def _wait_for_page_idle(driver, log=None, label="페이지", timeout=12):
@@ -548,6 +582,7 @@ def _cdp_evaluate(websocket_url, expression, timeout=3):
 def _auto_fill_login_id(port, login_id, timeout=8):
     deadline = time.time() + timeout
     tab = None
+    form_tab = None
     fallback_tab = None
 
     while time.time() < deadline:
@@ -559,8 +594,11 @@ def _auto_fill_login_id(port, login_id, timeout=8):
         ]
         fallback_tab = fallback_tab or (pages[0] if pages else None)
         tab = next((item for item in pages if "login.do" in item.get("url", "")), None)
+        form_tab = next((item for item in pages if _is_form_url(item.get("url", ""))), None)
         if tab:
             break
+        if form_tab:
+            return "신청서 페이지"
         time.sleep(0.25)
 
     tab = tab or fallback_tab
@@ -568,28 +606,7 @@ def _auto_fill_login_id(port, login_id, timeout=8):
         raise RuntimeError("DevTools에서 제어 가능한 Chrome 탭을 찾을 수 없습니다.")
 
     if "login.do" not in tab.get("url", ""):
-        _cdp_call(
-            tab["webSocketDebuggerUrl"],
-            "Page.navigate",
-            {"url": LOGIN_URL},
-            timeout=3,
-        )
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            tabs = _wait_for_debugger(port, timeout=1)
-            pages = [
-                item
-                for item in tabs
-                if item.get("type") == "page" and item.get("webSocketDebuggerUrl")
-            ]
-            login_tab = next(
-                (item for item in pages if "login.do" in item.get("url", "")),
-                None,
-            )
-            if login_tab:
-                tab = login_tab
-                break
-            time.sleep(0.25)
+        return "로그인 페이지 아님"
 
     script = f"""
     (() => {{
@@ -671,12 +688,14 @@ def open_chrome(port, login_id=DEFAULT_LOGIN_ID):
             "--disable-background-timer-throttling",
             "--disable-backgrounding-occluded-windows",
             "--disable-renderer-backgrounding",
-            LOGIN_URL,
+            START_URL,
         ],
         creationflags=subprocess.DETACHED_PROCESS,
     )
     try:
         target = _auto_fill_login_id(port, login_id)
+        if target in ("신청서 페이지", "로그인 페이지 아님"):
+            return True, f"시작 페이지 열기 완료: {START_URL}"
         return True, f"아이디 자동 입력 완료: {login_id} ({target})"
     except Exception as e:
         return False, f"아이디 자동 입력 건너뜀: {_short_error(e)}"
@@ -973,12 +992,54 @@ def _switch_to_form_window(driver, log, preferred_handle=None):
 def _safe_select(driver, el_id, value, field_label, env_key, log):
     """드롭다운 선택 — 항목 없으면 가독성 있는 오류 출력."""
     try:
-        select = Select(driver.find_element(By.ID, el_id))
+        el = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, el_id))
+        )
+        select = Select(el)
         value = _select_alias(el_id, value)
         try:
             select.select_by_visible_text(value)
         except NoSuchElementException:
-            select.select_by_value(value)
+            try:
+                select.select_by_value(value)
+            except NoSuchElementException:
+                wanted = " ".join(value.split())
+                matched = None
+                for option in select.options:
+                    text = " ".join((option.text or "").split())
+                    option_value = (option.get_attribute("value") or "").strip()
+                    if text == wanted or option_value == wanted:
+                        matched = option
+                        break
+                    if wanted and (wanted in text or text in wanted):
+                        matched = option
+                        break
+                if not matched:
+                    raise
+                driver.execute_script(
+                    """
+                    const select = arguments[0];
+                    const option = arguments[1];
+                    option.selected = true;
+                    select.dispatchEvent(new Event('input', {bubbles: true}));
+                    select.dispatchEvent(new Event('change', {bubbles: true}));
+                    """,
+                    el,
+                    matched,
+                )
+    except TimeoutException:
+        _err_box(
+            log,
+            f"[{field_label}] 드롭다운 없음",
+            f"id='{el_id}' 요소가 10초 내에 나타나지 않았습니다",
+            [
+                "신규 페이지에서 필드 ID가 변경됐을 수 있습니다",
+                "아래 저장된 HTML/캡처 파일을 보내주세요",
+                "로그인 세션이 유지 중인지 확인하세요",
+            ],
+        )
+        _log_debug_context(log, driver, f"[{field_label}] 드롭다운 없음")
+        raise
     except NoSuchElementException:
         _err_box(
             log,
@@ -1056,10 +1117,14 @@ def _select_alias(el_id, value):
     aliases = {
         "req_kind": {
             "개인": "P",
+            "媛쒖씤": "P",
             "P": "P",
             "개인사업자": "B",
+            "媛쒖씤?ъ뾽??": "B",
             "B": "B",
             "단체": "G",
+            "단체 또는 개인": "G",
+            "?⑥껜": "G",
             "G": "G",
         },
     }
@@ -1155,9 +1220,11 @@ def _radio_value_alias(name, value):
         "req_sex": {
             "남자": "M",
             "남": "M",
+            "?⑥옄": "M",
             "M": "M",
             "여자": "F",
             "여": "F",
+            "?ъ옄": "F",
             "F": "F",
         },
         "priority_type": {
@@ -1169,6 +1236,7 @@ def _radio_value_alias(name, value):
             "중소기업": "30",
             "30": "30",
             "일반": "00",
+            "?쇰컲": "00",
             "00": "00",
             "택시": "40",
             "40": "40",
@@ -1500,10 +1568,9 @@ def _run_form(driver, wait, cfg, log, stop_at_security_popup=False):
             )
             raise
         log("  ✓ 신청서 페이지로 이동 완료")
-        log("  ⏹ 여기서 종료합니다. 신청서 페이지가 보이면 [실행]을 다시 클릭하세요.")
-        return False
 
     log("  ✓ 신청서 페이지 확인 완료")
+    _wait_for_form_ready(driver, wait, log)
 
     # 신청유형
     if _maybe_select(driver, "req_kind", _cfg_text(cfg, "APPLICATION_TYPE"), "신청유형", "APPLICATION_TYPE", log):
@@ -1725,6 +1792,102 @@ def _attach_ids_from_cfg(cfg):
             attach_ids.append(attach_id)
 
     return attach_ids or list(_DEFAULT_ATTACH_IDS)
+
+
+def _unique_dirs(*dirs):
+    result = []
+    seen = set()
+    for path in dirs:
+        if not path:
+            continue
+        full = os.path.abspath(path)
+        key = os.path.normcase(full)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(full)
+    return result
+
+
+def _smart_upload_search_dirs(cfg):
+    env_path = cfg.get("_ENV_PATH", "")
+    env_dir = os.path.dirname(env_path) if env_path else ""
+    configured_dir = _cfg_text(cfg, "SMART_UPLOAD_DIR").strip('"')
+    if configured_dir and not os.path.isabs(configured_dir):
+        configured_dir = os.path.join(_RUNTIME_DIR, configured_dir)
+    return _unique_dirs(
+        configured_dir,
+        _RUNTIME_DIR,
+        os.path.join(_RUNTIME_DIR, "files"),
+        os.path.join(_RUNTIME_DIR, "env"),
+        _APP_DIR,
+        os.path.join(_APP_DIR, "files"),
+        env_dir,
+    )
+
+
+def _smart_upload_file_paths(cfg, log):
+    raw = _cfg_text(cfg, "SMART_UPLOAD_FILES")
+    if raw:
+        paths = [
+            item.strip().strip('"')
+            for item in raw.replace(";", ",").replace("|", ",").split(",")
+            if item.strip()
+        ]
+    else:
+        applicant = _cfg_text(cfg, "SMART_UPLOAD_NAME") or _cfg_text(cfg, "NAME")
+        if not applicant:
+            env_path = cfg.get("_ENV_PATH", "")
+            applicant = os.path.splitext(os.path.basename(env_path))[0] if env_path else ""
+        suffixes = [
+            "보조금구매지원신청서.PDF",
+            "차량구매계약서.PDF",
+            "주민등록등본.PDF",
+        ]
+        paths = []
+        search_dirs = _smart_upload_search_dirs(cfg)
+        for suffix in suffixes:
+            file_name = f"{applicant}{suffix}"
+            found = next(
+                (
+                    os.path.join(base_dir, file_name)
+                    for base_dir in search_dirs
+                    if os.path.exists(os.path.join(base_dir, file_name))
+                ),
+                os.path.join(search_dirs[0] if search_dirs else _RUNTIME_DIR, file_name),
+            )
+            paths.append(found)
+
+    if len(paths) > 7:
+        _err_box(
+            log,
+            "스마트 업로드 파일 개수 초과",
+            f"한 번에 업로드 가능한 파일은 최대 7개입니다. 현재 {len(paths)}개가 지정됐습니다",
+            [
+                "SMART_UPLOAD_FILES 값을 7개 이하로 줄이세요",
+                "필수 3종은 보조금구매지원신청서, 차량구매계약서, 주민등록등본입니다",
+            ],
+        )
+        raise ValueError("스마트 업로드 파일은 최대 7개까지 가능합니다")
+
+    missing = [path for path in paths if not os.path.exists(path)]
+    if missing:
+        _err_box(
+            log,
+            "스마트 업로드 파일 없음",
+            "파일명 규칙에 맞는 PDF를 찾지 못했습니다",
+            [
+                "배포 기준 기본 위치는 EVAutomation.exe와 같은 폴더입니다",
+                "개발 중에는 프로젝트 루트, files 폴더, env 폴더에도 둘 수 있습니다",
+                "예: 안윤준보조금구매지원신청서.PDF / 안윤준차량구매계약서.PDF / 안윤준주민등록등본.PDF",
+                "다른 폴더를 쓰려면 SMART_UPLOAD_DIR에 폴더 경로를 지정하세요",
+                "다른 위치라면 SMART_UPLOAD_FILES에 쉼표로 전체 경로를 지정하세요",
+                f"누락: {', '.join(os.path.basename(path) for path in missing)}",
+            ],
+        )
+        raise FileNotFoundError(f"스마트 업로드 파일 없음: {missing[0]}")
+
+    return paths
 
 
 def _attach_slot_state(driver, attach_id):
@@ -1977,29 +2140,7 @@ def _handle_attach_with_retries(driver, wait, attach_id, file_path, log, max_ret
     raise RuntimeError(f"[{attach_id}] 첨부파일 업로드 실패")
 
 
-def _run_attach(driver, wait, cfg, log):
-    log("━━━ [2단계] 파일 첨부 및 지원신청 시작 ━━━")
-    file_path = _cfg_text(cfg, "FILE1")
-    if not file_path:
-        _skip_empty(log, "첨부파일", "FILE1")
-        log("  ⏭ 첨부 및 지원신청 단계를 건너뜁니다")
-        return
-
-    log(f"  첨부 파일: {file_path}")
-
-    _switch_to_form_window(driver, log)
-    _wait_for_page_idle(driver, log, "첨부 반영 확인 전 부모 화면", timeout=3)
-    attach_ids = _attach_ids_from_cfg(cfg)
-    log(f"  첨부 순서: {', '.join(attach_ids)}")
-
-    success_count = 0
-    for attach_id in attach_ids:
-        log(f"  → [{attach_id}] 처리 시작")
-        _handle_attach_with_retries(driver, wait, attach_id, file_path, log, max_retries=3)
-        success_count += 1
-
-    log(f"  ✓ 첨부 완료 슬롯 수: {success_count}/{len(attach_ids)}")
-
+def _click_support_apply(driver, wait, log):
     log("  → 지원신청 버튼 클릭 중...")
     _drain_alerts(driver, log, "지원신청 전", timeout=0.5)
     apply_locator = (
@@ -2030,7 +2171,7 @@ def _run_attach(driver, wait, cfg, log):
             "지원신청 버튼을 찾을 수 없음",
             "goApply('101') 버튼이 페이지에 나타나지 않았습니다",
             [
-                "필수 첨부파일(A 슬롯)이 업로드됐는지 확인하세요",
+                "필수 첨부파일이 업로드됐는지 확인하세요",
                 "Chrome 창에서 신청 가능한 상태인지 직접 확인하세요",
             ],
         )
@@ -2045,6 +2186,239 @@ def _run_attach(driver, wait, cfg, log):
         _log_debug_context(log, driver, "지원신청 버튼 조작 실패")
         raise
 
+
+def _set_smart_upload_input(driver, wait, file_paths, log):
+    _switch_to_form_window(driver, log)
+    _wait_for_page_idle(driver, log, "스마트 업로드 입력 전", timeout=3)
+    file_el = wait.until(EC.presence_of_element_located((By.ID, "smartUploadFiles")))
+    log("  → 스마트 업로드 파일 선택 중...")
+    for path in file_paths:
+        log(f"     - {os.path.basename(path)}")
+    driver.execute_script(
+        """
+        const el = arguments[0];
+        el.removeAttribute('disabled');
+        el.style.display = 'block';
+        el.style.visibility = 'visible';
+        el.style.opacity = '1';
+        el.style.position = 'fixed';
+        el.style.left = '20px';
+        el.style.top = '20px';
+        el.style.width = '520px';
+        el.style.height = '34px';
+        el.style.zIndex = '2147483647';
+        el.scrollIntoView({block:'center'});
+        """,
+        file_el,
+    )
+    file_el.send_keys("\n".join(file_paths))
+    try:
+        wait.until(
+            lambda d: d.execute_script(
+                """
+                const el = document.getElementById('smartUploadFiles');
+                const fileCount = el && el.files ? el.files.length : 0;
+                const matching = document.getElementById('smartUploadMatching');
+                const list = document.getElementById('matchingList');
+                const matchingVisible = matching && getComputedStyle(matching).display !== 'none';
+                const matchingText = (list || matching || document).innerText || '';
+                return fileCount > 0 || (matchingVisible && matchingText.trim().length > 0);
+                """
+            )
+        )
+    except TimeoutException:
+        state = _smart_matching_state(driver)
+        _err_box(
+            log,
+            "스마트 업로드 파일 선택 확인 실패",
+            "파일 경로 입력 후에도 자동 분류 영역이 나타나지 않았습니다",
+            [
+                "파일이 PDF이고 각 파일이 10MB 이하인지 확인하세요",
+                "한 번에 업로드 가능한 파일은 최대 7개입니다",
+                f"분류 영역 상태: visible={state.get('visible')}, rows={state.get('rowCount')}, buttons={state.get('buttonCount')}",
+                f"표시 텍스트: {state.get('text', '')}",
+            ],
+        )
+        _log_debug_context(log, driver, "스마트 업로드 파일 선택 확인 실패")
+        raise RuntimeError("스마트 업로드 파일 선택 확인 실패")
+    log("  ✓ 스마트 업로드 파일 선택 완료")
+
+
+def _smart_matching_state(driver):
+    return driver.execute_script(
+        """
+        const matching = document.getElementById('smartUploadMatching');
+        const list = document.getElementById('matchingList');
+        const root = matching || list || document;
+        const actionSelector = 'button, input[type="button"], input[type="submit"], a, [role="button"]';
+        const buttons = Array.from(root.querySelectorAll('.btn-apply-file, ' + actionSelector))
+          .filter((button) => {
+            const text = (
+              button.innerText ||
+              button.textContent ||
+              button.value ||
+              button.getAttribute('aria-label') ||
+              ''
+            ).trim();
+            const style = window.getComputedStyle(button);
+            const rect = button.getBoundingClientRect();
+            return /적용|apply/i.test(text)
+              && style.display !== 'none'
+              && style.visibility !== 'hidden'
+              && rect.width > 0
+              && rect.height > 0
+              && !button.disabled;
+          });
+        const rows = Array.from(root.querySelectorAll('li, .matching-item, .smart-upload__matching-item, .file-row'))
+          .filter((row) => (row.innerText || '').trim());
+        return {
+          visible: !!matching && getComputedStyle(matching).display !== 'none',
+          rowCount: rows.length,
+          buttonCount: buttons.length,
+          buttonTexts: buttons.map((button) => (button.innerText || button.textContent || button.value || '').trim()),
+          text: (root.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 500)
+        };
+        """
+    )
+
+
+def _click_smart_apply_buttons(driver, wait, file_count, log):
+    log("  → 자동 분류 결과 대기 중...")
+    try:
+        wait.until(lambda d: _smart_matching_state(d).get("buttonCount", 0) > 0)
+    except TimeoutException:
+        state = _smart_matching_state(driver)
+        _err_box(
+            log,
+            "스마트 업로드 자동 분류 실패",
+            "파일 선택 후 적용 버튼이 나타나지 않았습니다",
+            [
+                f"분류 영역 상태: visible={state.get('visible')}, rows={state.get('rowCount')}, buttons={state.get('buttonCount')}",
+                f"버튼 텍스트: {state.get('buttonTexts', [])}",
+                f"표시 텍스트: {state.get('text', '')}",
+            ],
+        )
+        _log_debug_context(log, driver, "스마트 업로드 자동 분류 실패")
+        raise RuntimeError("스마트 업로드 자동 분류 실패")
+
+    clicked = 0
+    max_clicks = max(file_count, 1)
+    while clicked < max_clicks:
+        clicked_one = driver.execute_script(
+            """
+            const matching = document.getElementById('smartUploadMatching');
+            const list = document.getElementById('matchingList');
+            const root = matching || list || document;
+            const actionSelector = 'button, input[type="button"], input[type="submit"], a, [role="button"]';
+            const buttons = Array.from(root.querySelectorAll('.btn-apply-file, ' + actionSelector));
+            const button = buttons.find((el) => {
+              if (el.dataset.codexSmartClicked === '1') return false;
+              const text = (
+                el.innerText ||
+                el.textContent ||
+                el.value ||
+                el.getAttribute('aria-label') ||
+                ''
+              ).trim();
+              const style = window.getComputedStyle(el);
+              const rect = el.getBoundingClientRect();
+              return (el.classList.contains('btn-apply-file') || /적용|apply/i.test(text))
+                && style.display !== 'none'
+                && style.visibility !== 'hidden'
+                && rect.width > 0
+                && rect.height > 0
+                && !el.disabled;
+            });
+            if (!button) return { clicked: false, text: '' };
+            const action = button.closest('.matching-list__action');
+            const row = button.closest('li, .matching-list__item, .matching-item') || action?.parentElement || button.parentElement;
+            const rowText = (row?.innerText || '').replace(/\\s+/g, ' ').trim();
+            const select = action?.querySelector('.matching-select') || row?.querySelector('.matching-select');
+            button.dataset.codexSmartClicked = '1';
+            button.scrollIntoView({block:'center', inline:'nearest'});
+            button.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true, view: window}));
+            button.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true, view: window}));
+            button.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+            return {
+              clicked: true,
+              text: (button.innerText || button.textContent || button.value || '').trim(),
+              recommendation: select ? select.value : '',
+              rowText
+            };
+            """
+        )
+        if not clicked_one.get("clicked"):
+            break
+        clicked += 1
+        rec = clicked_one.get("recommendation") or ""
+        log(f"  ✓ 자동 분류 적용 버튼 클릭: {clicked}/{file_count} ({rec})")
+        _drain_alerts(driver, log, "스마트 업로드 적용", timeout=0.5, max_alerts=2)
+        time.sleep(0.5)
+
+    if clicked < file_count:
+        state = _smart_matching_state(driver)
+        _err_box(
+            log,
+            "스마트 업로드 적용 부족",
+            f"필요 {file_count}개 중 {clicked}개만 적용했습니다",
+            [
+                "자동 분류 행의 적용 버튼 구조가 변경됐을 수 있습니다",
+                f"남은 버튼 수: {state.get('buttonCount')}",
+                f"버튼 텍스트: {state.get('buttonTexts', [])}",
+                f"표시 텍스트: {state.get('text', '')}",
+            ],
+        )
+        _log_debug_context(log, driver, "스마트 업로드 적용 부족")
+        raise RuntimeError("스마트 업로드 적용 부족")
+
+
+def _run_attach_v1(driver, wait, cfg, log):
+    log("━━━ [2단계] 파일 첨부 및 지원신청 시작(v1) ━━━")
+    file_path = _cfg_text(cfg, "FILE1")
+    if not file_path:
+        _skip_empty(log, "첨부파일", "FILE1")
+        log("  ⏭ 첨부 및 지원신청 단계를 건너뜁니다")
+        return
+
+    log(f"  첨부 파일: {file_path}")
+
+    _switch_to_form_window(driver, log)
+    _wait_for_page_idle(driver, log, "첨부 반영 확인 전 부모 화면", timeout=3)
+    attach_ids = _attach_ids_from_cfg(cfg)
+    log(f"  첨부 순서: {', '.join(attach_ids)}")
+
+    success_count = 0
+    for attach_id in attach_ids:
+        log(f"  → [{attach_id}] 처리 시작")
+        _handle_attach_with_retries(driver, wait, attach_id, file_path, log, max_retries=3)
+        success_count += 1
+
+    log(f"  ✓ 첨부 완료 슬롯 수: {success_count}/{len(attach_ids)}")
+
+    _click_support_apply(driver, wait, log)
+
+    log("✅ [2단계] 완료")
+
+
+def _run_attach(driver, wait, cfg, log):
+    log("━━━ [2단계] 스마트 파일 첨부 및 지원신청 시작 ━━━")
+    if _cfg_text(cfg, "UPLOAD_VERSION").lower() in ("v1", "legacy", "old"):
+        return _run_attach_v1(driver, wait, cfg, log)
+
+    try:
+        file_paths = _smart_upload_file_paths(cfg, log)
+    except FileNotFoundError:
+        if _cfg_text(cfg, "FILE1"):
+            _warn_box(log, "스마트 업로드 파일 없음", "FILE1이 있어 v1 첨부 방식으로 전환합니다")
+            return _run_attach_v1(driver, wait, cfg, log)
+        raise
+
+    _switch_to_form_window(driver, log)
+    _wait_for_page_idle(driver, log, "스마트 업로드 전 부모 화면", timeout=3)
+    _set_smart_upload_input(driver, wait, file_paths, log)
+    _click_smart_apply_buttons(driver, wait, len(file_paths), log)
+    log(f"  ✓ 스마트 업로드 적용 완료: {len(file_paths)}개")
+    _click_support_apply(driver, wait, log)
     log("✅ [2단계] 완료")
 
 
@@ -2055,6 +2429,7 @@ def _run_attach(driver, wait, cfg, log):
 def run_all(env_path, port, log_cb, file1_path=None, driver_holder=None, stop_at_security_popup=False):
     log_cb(f"env 파일 로드: {os.path.basename(env_path)}")
     cfg = dotenv_values(env_path)
+    cfg["_ENV_PATH"] = env_path
     if file1_path:
         cfg["FILE1"] = file1_path
         log_cb(f"FILE1 GUI 선택: {file1_path}")

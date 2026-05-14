@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EV 보조금 신청 자동화 사용자설명서</title>
+  <style>
+    body {
+      margin: 0;
+      color: #172033;
+      background: #f6f8fb;
+      font-family: "Malgun Gothic", "Apple SD Gothic Neo", Arial, sans-serif;
+      line-height: 1.65;
+    }
+    main {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 36px 22px 56px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 30px;
+      color: #0f2f63;
+    }
+    h2 {
+      margin: 34px 0 12px;
+      padding-bottom: 7px;
+      border-bottom: 2px solid #d9e6f6;
+      font-size: 20px;
+      color: #123f7a;
+    }
+    h3 {
+      margin: 22px 0 8px;
+      font-size: 16px;
+      color: #26364f;
+    }
+    .card {
+      background: #ffffff;
+      border: 1px solid #dfe7f0;
+      border-radius: 8px;
+      padding: 18px 20px;
+      box-shadow: 0 8px 24px rgba(20, 48, 90, 0.06);
+    }
+    .note {
+      margin-top: 12px;
+      padding: 12px 14px;
+      border-left: 4px solid #2f80ed;
+      background: #eef6ff;
+    }
+    .warn {
+      border-left-color: #e67700;
+      background: #fff6e8;
+    }
+    code, pre {
+      font-family: Consolas, "Courier New", monospace;
+    }
+    pre {
+      overflow: auto;
+      padding: 14px;
+      border-radius: 8px;
+      background: #101828;
+      color: #f2f4f7;
+      line-height: 1.45;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: #ffffff;
+    }
+    th, td {
+      padding: 9px 10px;
+      border: 1px solid #dfe7f0;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #eef3fb;
+      color: #173a69;
+    }
+    ol, ul {
+      padding-left: 24px;
+    }
+    .small {
+      color: #5d6b82;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="card">
+    <h1>EV 보조금 신청 자동화 사용자설명서</h1>
+    <p class="small">배포 폴더 안의 <strong>EVAutomation.exe</strong>를 실행해서 ev.or.kr 판매자 신청서를 자동 작성하고, PDF 3종을 첨부한 뒤 지원신청까지 진행하는 프로그램입니다.</p>
+    <div class="note">
+      이 파일은 인터넷 연결 없이도 열 수 있습니다. 다른 PC로 옮길 때는 <strong>EVAutomation 폴더 전체</strong>를 복사하세요.
+    </div>
+  </section>
+
+  <h2>1. 폴더 구성</h2>
+  <p>배포 폴더는 아래 구조로 사용합니다.</p>
+  <pre>EVAutomation\
+  EVAutomation.exe
+  env\
+    양태건.env
+    노태윤.env
+    안윤준.env
+  files\
+    양태건보조금구매지원신청서.PDF
+    양태건차량구매계약서.PDF
+    양태건주민등록등본.PDF</pre>
+  <ul>
+    <li><code>env</code> 폴더: 신청자별 설정 파일을 넣습니다.</li>
+    <li><code>files</code> 폴더: 신청자별 첨부 PDF를 넣습니다.</li>
+    <li><code>EVAutomation.exe</code>: 실행 파일입니다.</li>
+  </ul>
+
+  <h2>2. PDF 파일명 규칙</h2>
+  <p>PDF 파일명은 env 파일 안의 <code>NAME</code> 값과 정확히 같아야 합니다.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>env 값</th>
+        <th>필요한 PDF 파일명</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>NAME=양태건</code></td>
+        <td>
+          <code>양태건보조금구매지원신청서.PDF</code><br>
+          <code>양태건차량구매계약서.PDF</code><br>
+          <code>양태건주민등록등본.PDF</code>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="note warn">
+    파일명 앞부분의 이름, 띄어쓰기, 오타가 다르면 자동 첨부가 실패합니다. 확장자는 <code>.PDF</code> 또는 <code>.pdf</code> 모두 보통 문제 없지만, 가능하면 예시처럼 맞춰두세요.
+  </div>
+
+  <h2>3. env 파일 준비</h2>
+  <p><code>env</code> 폴더에서 신청자별 <code>.env</code> 파일을 열어 내용을 확인합니다.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>항목</th>
+        <th>설명</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td><code>SEARCH</code></td><td>지자체 검색어입니다. 예: <code>청주</code></td></tr>
+      <tr><td><code>NAME</code></td><td>신청자 이름입니다. PDF 파일명 앞부분과 일치해야 합니다.</td></tr>
+      <tr><td><code>CAR_MODEL</code></td><td>신청 차종입니다. 사이트의 차종 명칭과 정확히 일치해야 합니다.</td></tr>
+      <tr><td><code>CONTRACT_DAY</code></td><td>계약일입니다. 형식: <code>YYYY-MM-DD</code></td></tr>
+      <tr><td><code>DELIVERY_DATE</code></td><td>출고예정일입니다. 형식: <code>YYYY-MM-DD</code></td></tr>
+      <tr><td><code>ADDRESS</code>, <code>ADDRESS2</code></td><td>주소와 상세주소입니다.</td></tr>
+      <tr><td><code>SMART_UPLOAD_DIR=files</code></td><td>PDF를 <code>files</code> 폴더에서 찾도록 하는 설정입니다.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. 실행 순서</h2>
+  <ol>
+    <li><code>EVAutomation.exe</code>를 실행합니다.</li>
+    <li>프로그램 화면에서 사용할 칸의 <strong>Chrome</strong> 버튼을 누릅니다.</li>
+    <li>열린 Chrome에서 ev.or.kr에 로그인합니다.</li>
+    <li>프로그램 화면에서 <strong>env</strong> 옆의 <strong>...</strong> 버튼을 눌러 신청자 env 파일을 선택합니다.</li>
+    <li><code>files</code> 폴더에 해당 신청자의 PDF 3개가 있는지 확인합니다.</li>
+    <li><strong>실행</strong> 버튼을 누릅니다.</li>
+    <li>자동 입력, 스마트 파일 첨부, 적용, 지원신청이 순서대로 진행됩니다.</li>
+  </ol>
+  <div class="note">
+    현재 방식에서는 <strong>FILE1 첨부 파일 선택</strong> 칸을 직접 고르지 않아도 됩니다. 프로그램이 <code>files</code> 폴더에서 <code>NAME</code> 기준으로 PDF 3개를 자동으로 찾습니다.
+  </div>
+
+  <h2>5. 실행 전 체크리스트</h2>
+  <ul>
+    <li>Chrome 로그인 완료</li>
+    <li>env 파일의 <code>NAME</code>과 PDF 파일명 앞부분 일치</li>
+    <li><code>files</code> 폴더에 PDF 3개 존재</li>
+    <li>PDF 1개당 10MB 이하</li>
+    <li>스마트 업로드 파일 수 7개 이하</li>
+    <li>차종명, 계약일, 출고예정일, 연락처, 주소 확인</li>
+  </ul>
+
+  <h2>6. 자주 나는 오류</h2>
+  <h3>PDF 파일을 찾지 못한다고 나올 때</h3>
+  <ul>
+    <li><code>files</code> 폴더 안에 PDF가 있는지 확인합니다.</li>
+    <li>env의 <code>NAME</code> 값과 파일명 앞부분이 같은지 확인합니다.</li>
+    <li>예: <code>NAME=양태건</code>이면 파일명도 반드시 <code>양태건...</code>으로 시작해야 합니다.</li>
+  </ul>
+
+  <h3>신청서 화면에서 멈출 때</h3>
+  <ul>
+    <li>ev.or.kr 로그인 세션이 풀렸는지 확인합니다.</li>
+    <li>Chrome이 프로그램에서 연 포트의 창인지 확인합니다.</li>
+    <li>로그에 저장된 화면 캡처/HTML 파일이 있으면 개발자에게 전달합니다.</li>
+  </ul>
+
+  <h3>차종 선택 오류가 날 때</h3>
+  <ul>
+    <li>env의 <code>CAR_MODEL</code> 값이 사이트 차종명과 정확히 같은지 확인합니다.</li>
+    <li>띄어쓰기, 괄호, 슬래시 앞뒤 문구가 다르면 선택이 실패할 수 있습니다.</li>
+  </ul>
+
+  <h2>7. 다른 PC로 옮길 때</h2>
+  <ol>
+    <li><code>dist</code> 안의 <code>EVAutomation</code> 폴더를 통째로 복사합니다.</li>
+    <li>다른 PC에 붙여넣습니다.</li>
+    <li><code>env</code> 폴더와 <code>files</code> 폴더가 같이 있는지 확인합니다.</li>
+    <li><code>EVAutomation.exe</code>를 실행합니다.</li>
+  </ol>
+  <p class="small">마지막 업데이트: 2026-05-14</p>
+</main>
+</body>
+</html>
