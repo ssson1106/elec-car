@@ -1004,14 +1004,28 @@ def _safe_select(driver, el_id, value, field_label, env_key, log):
                 select.select_by_value(value)
             except NoSuchElementException:
                 wanted = " ".join(value.split())
+                wanted_compact = "".join(wanted.split())
                 matched = None
                 for option in select.options:
                     text = " ".join((option.text or "").split())
                     option_value = (option.get_attribute("value") or "").strip()
-                    if text == wanted or option_value == wanted:
+                    text_compact = "".join(text.split())
+                    option_value_compact = "".join(option_value.split())
+                    if (
+                        text == wanted
+                        or option_value == wanted
+                        or text_compact == wanted_compact
+                        or option_value_compact == wanted_compact
+                    ):
                         matched = option
                         break
                     if wanted and (wanted in text or text in wanted):
+                        matched = option
+                        break
+                    if wanted_compact and (
+                        wanted_compact in text_compact
+                        or text_compact in wanted_compact
+                    ):
                         matched = option
                         break
                 if not matched:
@@ -1126,6 +1140,11 @@ def _select_alias(el_id, value):
             "단체 또는 개인": "G",
             "?⑥껜": "G",
             "G": "G",
+        },
+        "model_cd": {
+            "아이오닉 9 성능형 AWD / 일반승용": "IONIQ9_STD_AWD",
+            "아이오닉9 성능형 AWD / 일반승용": "IONIQ9_STD_AWD",
+            "IONIQ9_STD_AWD": "IONIQ9_STD_AWD",
         },
     }
     return aliases.get(el_id, {}).get(value, value)
@@ -1839,14 +1858,20 @@ def _smart_upload_file_paths(cfg, log):
         if not applicant:
             env_path = cfg.get("_ENV_PATH", "")
             applicant = os.path.splitext(os.path.basename(env_path))[0] if env_path else ""
-        suffixes = [
+        required_suffixes = [
             "보조금구매지원신청서.PDF",
             "차량구매계약서.PDF",
             "주민등록등본.PDF",
         ]
+        optional_suffixes = [
+            "우선순위증빙자료.PDF",
+            "말소사실증명서.PDF",
+            "자동차등록원부.PDF",
+            "가족관계증명서.PDF",
+        ]
         paths = []
         search_dirs = _smart_upload_search_dirs(cfg)
-        for suffix in suffixes:
+        for suffix in required_suffixes:
             file_name = f"{applicant}{suffix}"
             found = next(
                 (
@@ -1857,6 +1882,18 @@ def _smart_upload_file_paths(cfg, log):
                 os.path.join(search_dirs[0] if search_dirs else _RUNTIME_DIR, file_name),
             )
             paths.append(found)
+        for suffix in optional_suffixes:
+            file_name = f"{applicant}{suffix}"
+            found = next(
+                (
+                    os.path.join(base_dir, file_name)
+                    for base_dir in search_dirs
+                    if os.path.exists(os.path.join(base_dir, file_name))
+                ),
+                "",
+            )
+            if found:
+                paths.append(found)
 
     if len(paths) > 7:
         _err_box(
@@ -2266,8 +2303,7 @@ def _smart_matching_state(driver):
               && style.display !== 'none'
               && style.visibility !== 'hidden'
               && rect.width > 0
-              && rect.height > 0
-              && !button.disabled;
+              && rect.height > 0;
           });
         const rows = Array.from(root.querySelectorAll('li, .matching-item, .smart-upload__matching-item, .file-row'))
           .filter((row) => (row.innerText || '').trim());
@@ -2275,6 +2311,7 @@ def _smart_matching_state(driver):
           visible: !!matching && getComputedStyle(matching).display !== 'none',
           rowCount: rows.length,
           buttonCount: buttons.length,
+          enabledButtonCount: buttons.filter((button) => !button.disabled).length,
           buttonTexts: buttons.map((button) => (button.innerText || button.textContent || button.value || '').trim()),
           text: (root.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 500)
         };
@@ -2326,14 +2363,65 @@ def _click_smart_apply_buttons(driver, wait, file_count, log):
                 && style.display !== 'none'
                 && style.visibility !== 'hidden'
                 && rect.width > 0
-                && rect.height > 0
-                && !el.disabled;
+                && rect.height > 0;
             });
             if (!button) return { clicked: false, text: '' };
             const action = button.closest('.matching-list__action');
-            const row = button.closest('li, .matching-list__item, .matching-item') || action?.parentElement || button.parentElement;
+            const row = button.closest('li, .smart-upload__item, .matching-list__item, .matching-item') || action?.parentElement || button.parentElement;
             const rowText = (row?.innerText || '').replace(/\\s+/g, ' ').trim();
+            const fileNameText = (
+              row?.querySelector('.smart-upload__file-name')?.textContent ||
+              row?.querySelector('[class*="file-name"]')?.textContent ||
+              rowText
+            ).replace(/\\s+/g, ' ').trim();
             const select = action?.querySelector('.matching-select') || row?.querySelector('.matching-select');
+            if (select && !select.value) {
+              const normalize = (text) => (text || '')
+                .replace(/\\.pdf$/i, '')
+                .replace(/[\\s._\\-()\\[\\]]+/g, '')
+                .trim();
+              const fileKey = normalize(fileNameText);
+              const titleAliases = [
+                ['보조금구매지원신청서', '보조금 구매지원 신청서'],
+                ['차량구매계약서', '차량 구매계약서'],
+                ['주민등록등본', '주민등록등본'],
+                ['우선순위증빙자료', '우선순위 증빙자료'],
+                ['말소사실증명서', '말소사실증명서'],
+                ['자동차등록원부', '자동차 등록원부'],
+                ['가족관계증명서', '가족관계증명서'],
+              ];
+              const alias = titleAliases.find(([key]) => fileKey.includes(normalize(key)));
+              const option = Array.from(select.options).find((opt) => {
+                const valueKey = normalize(opt.value);
+                const textKey = normalize(opt.textContent);
+                if (!valueKey && !textKey) return false;
+                if (alias) {
+                  const aliasKey = normalize(alias[1]);
+                  return valueKey === aliasKey || textKey === aliasKey;
+                }
+                return (valueKey && fileKey.includes(valueKey))
+                  || (textKey && fileKey.includes(textKey));
+              });
+              if (option) {
+                select.value = option.value;
+                option.selected = true;
+                select.dispatchEvent(new Event('input', {bubbles: true}));
+                select.dispatchEvent(new Event('change', {bubbles: true}));
+                if (window.jQuery) window.jQuery(select).val(option.value).trigger('change');
+              }
+            }
+            if (button.disabled && select?.value) {
+              button.disabled = false;
+              button.removeAttribute('disabled');
+            }
+            if (button.disabled) {
+              return {
+                clicked: false,
+                text: (button.innerText || button.textContent || button.value || '').trim(),
+                recommendation: select ? select.value : '',
+                rowText
+              };
+            }
             button.dataset.codexSmartClicked = '1';
             button.scrollIntoView({block:'center', inline:'nearest'});
             button.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true, view: window}));

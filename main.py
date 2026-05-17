@@ -35,7 +35,6 @@ class RowFrame(ctk.CTkFrame):
         self._mini_log_lines = []
 
         self.env_var = tk.StringVar()
-        self.file1_var = tk.StringVar()
         self.security_popup_only_var = tk.BooleanVar(value=False)
         self._status_var = tk.StringVar(value="대기")
         self._driver_holder = None
@@ -89,14 +88,6 @@ class RowFrame(ctk.CTkFrame):
             placeholder="env 파일 선택",
             command=self._browse,
         )
-        self._make_picker_row(
-            row=2,
-            label="FILE1",
-            variable=self.file1_var,
-            placeholder="첨부 파일 선택",
-            command=self._browse_file1,
-        )
-
         actions = ctk.CTkFrame(self, fg_color="transparent")
         actions.grid(row=3, column=0, padx=8, pady=(2, 4), sticky="ew")
         actions.grid_columnconfigure((0, 1, 2, 3), weight=1, uniform="actions")
@@ -245,19 +236,6 @@ class RowFrame(ctk.CTkFrame):
         if path:
             self.env_var.set(path)
 
-    def _browse_file1(self):
-        self._select_card()
-        path = filedialog.askopenfilename(
-            title="FILE1 첨부 파일 선택",
-            filetypes=[
-                ("PDF 파일", "*.pdf"),
-                ("이미지 파일", "*.jpg *.jpeg *.png"),
-                ("모든 파일", "*.*"),
-            ],
-        )
-        if path:
-            self.file1_var.set(path)
-
     def _open_chrome(self):
         self._select_card()
         try:
@@ -298,11 +276,6 @@ class RowFrame(ctk.CTkFrame):
             self._log(f"env 파일 없음: {path}")
             return
 
-        file1_path = self.file1_var.get().strip()
-        if file1_path and not os.path.exists(file1_path):
-            self._log(f"FILE1 파일 없음: {file1_path}")
-            return
-
         stop_at_security_popup = self.security_popup_only_var.get()
 
         if self._active_thread and self._active_thread.is_alive():
@@ -323,7 +296,6 @@ class RowFrame(ctk.CTkFrame):
                     path,
                     self.port,
                     self._log,
-                    file1_path=file1_path or None,
                     driver_holder=driver_holder,
                     stop_at_security_popup=stop_at_security_popup,
                 )
