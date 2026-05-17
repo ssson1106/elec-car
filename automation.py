@@ -45,7 +45,7 @@ _CHROME_PROFILE_BASE = os.path.join(_APP_DATA_DIR, "elec-car", "chrome-debug")
 _DEBUG_DIR = os.path.join(_APP_DIR, "debug")
 
 LOGIN_URL = "https://ev.or.kr/nportal/login.do"
-FORM_URL = "https://ev.or.kr/ev_ps/ps/seller/sellerApplyform_new"
+FORM_URL = "https://ev.or.kr/ev_ps/ps/seller/sellerApplyWrite?car_type=11"
 START_URL = FORM_URL
 DEFAULT_LOGIN_ID = "D034726"
 
@@ -169,6 +169,21 @@ def _save_debug_snapshot(log, driver, step):
         log(f"  ↳ 디버그 스냅샷 저장 실패: {_short_error(e)}")
 
 
+def _save_debug_html(log, step, html):
+    try:
+        os.makedirs(_DEBUG_DIR, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        name = f"{stamp}_{_safe_filename(step)}"
+        html_path = os.path.join(_DEBUG_DIR, f"{name}.html")
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html or "")
+        log(f"  ↳ HTML 저장: {html_path}")
+        return html_path
+    except Exception as e:
+        log(f"  ↳ HTML 저장 실패: {_short_error(e)}")
+        return ""
+
+
 def _wait_for_form_ready(driver, wait, log):
     markers = [
         (By.ID, "req_kind"),
@@ -268,7 +283,12 @@ def _is_form_url(url):
     try:
         current = urlparse(url)
         target = urlparse(FORM_URL)
-        return current.netloc == target.netloc and current.path == target.path
+        form_paths = {
+            target.path,
+            "/ev_ps/ps/seller/sellerApplyform_new",
+            "/ev_ps/ps/seller/sellerApplyWrite",
+        }
+        return current.netloc == target.netloc and current.path in form_paths
     except Exception:
         return False
 
@@ -308,6 +328,47 @@ def _click_element(driver, wait, locator, step, log):
                         continue
                 except Exception:
                     pass
+            break
+
+    _err_box(
+        log,
+        step,
+        _short_error(last_err),
+        ["아래 위치/요소 정보를 보고 사이트 화면이 예상 단계인지 확인하세요"],
+    )
+    _log_debug_context(log, driver, step, el)
+    raise last_err
+
+
+def _click_element_native(driver, wait, locator, step, log):
+    el = None
+    last_err = None
+    for attempt in range(2):
+        try:
+            _drain_alerts(driver, log, f"{step} 전", timeout=0.3)
+            _wait_for_page_idle(driver, log, f"{step} 전")
+            el = wait.until(EC.element_to_be_clickable(locator))
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center', inline:'nearest'});",
+                el,
+            )
+            time.sleep(0.1)
+            el.click()
+            return el
+        except UnexpectedAlertPresentException as e:
+            last_err = e
+            if _handle_unexpected_alert(driver, log, step, e):
+                continue
+            break
+        except Exception as e:
+            last_err = e
+            if el is not None:
+                try:
+                    driver.execute_script("arguments[0].click();", el)
+                    _warn_box(log, step, "실제 클릭 실패 후 JavaScript 클릭으로 진행했습니다")
+                    return el
+                except Exception as fallback_e:
+                    last_err = fallback_e
             break
 
     _err_box(
@@ -809,6 +870,189 @@ def _has_security_code_elements(driver):
     return False
 
 
+def _has_attach_entry(driver):
+    try:
+        if driver.find_elements(By.ID, "smartUploadFiles"):
+            return True
+        if driver.find_elements(By.ID, "div_file_upload"):
+            visible = driver.execute_script(
+                """
+                const el = document.getElementById('div_file_upload');
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none'
+                  && style.visibility !== 'hidden'
+                  && rect.width > 0
+                  && rect.height > 0;
+                """
+            )
+            if visible:
+                return True
+        return bool(driver.find_elements(
+            By.XPATH, "//*[@onclick and contains(@onclick, 'popupAttachFile')]"
+        ))
+    except Exception:
+        return False
+
+
+def _collect_save_diagnostics(driver):
+    info = {
+        "url": "",
+        "title": "",
+        "form_action": "",
+        "file_upload_display": "",
+        "has_smart_upload": False,
+        "has_attach_button": False,
+        "buttons": [],
+        "iframe": {},
+    }
+    try:
+        info.update(driver.execute_script(
+            """
+            const form = document.getElementById('editForm') || document.forms.editForm;
+            const fileUpload = document.getElementById('div_file_upload');
+            const buttons = Array.from(document.querySelectorAll('button'))
+              .map((b) => ({
+                text: (b.innerText || b.textContent || '').replace(/\\s+/g, ' ').trim(),
+                onclick: b.getAttribute('onclick') || '',
+                display: getComputedStyle(b).display,
+                visible: getComputedStyle(b).display !== 'none'
+                  && getComputedStyle(b).visibility !== 'hidden'
+                  && b.getBoundingClientRect().width > 0
+                  && b.getBoundingClientRect().height > 0
+              }))
+              .filter((b) => b.text || b.onclick)
+              .slice(-12);
+            return {
+              url: location.href,
+              title: document.title,
+              form_action: form ? form.action : '',
+              file_upload_display: fileUpload ? getComputedStyle(fileUpload).display : '(없음)',
+              has_smart_upload: !!document.getElementById('smartUploadFiles'),
+              has_attach_button: !!document.querySelector('[onclick*="popupAttachFile"]'),
+              buttons
+            };
+            """
+        ))
+    except Exception as e:
+        info["parent_error"] = _short_error(e)
+
+    try:
+        iframe = driver.find_element(By.NAME, "randomsave")
+        driver.switch_to.frame(iframe)
+        info["iframe"] = driver.execute_script(
+            """
+            return {
+              url: location.href,
+              title: document.title,
+              text: ((document.body && document.body.innerText) || '')
+                .replace(/\\s+/g, ' ')
+                .trim()
+                .slice(0, 1200),
+              html: document.documentElement ? document.documentElement.outerHTML : ''
+            };
+            """
+        )
+    except Exception as e:
+        info["iframe"] = {"error": _short_error(e)}
+    finally:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+
+    return info
+
+
+def _looks_like_save_server_error(info):
+    iframe = info.get("iframe") or {}
+    haystack = " ".join([
+        iframe.get("url", ""),
+        iframe.get("title", ""),
+        iframe.get("text", ""),
+    ]).lower()
+    return (
+        "404" in haystack
+        or "not found" in haystack
+        or "error" in haystack
+        or "exception" in haystack
+        or "cud_new" in iframe.get("url", "")
+    )
+
+
+def _log_save_diagnostics(log, driver, label):
+    info = _collect_save_diagnostics(driver)
+    log(f"  ↳ 저장 진단: url={info.get('url', '')}")
+    log(f"  ↳ 저장 form action: {info.get('form_action', '') or '(없음)'}")
+    log(
+        "  ↳ 첨부 상태: "
+        f"div_file_upload display={info.get('file_upload_display')}, "
+        f"smartUploadFiles={info.get('has_smart_upload')}, "
+        f"popupAttachFile={info.get('has_attach_button')}"
+    )
+    visible_buttons = [
+        f"{b.get('text') or '(text 없음)'} | {b.get('onclick')}"
+        for b in info.get("buttons", [])
+        if b.get("visible")
+    ]
+    if visible_buttons:
+        log(f"  ↳ 표시 버튼: {' / '.join(visible_buttons[-6:])}")
+
+    iframe = info.get("iframe") or {}
+    if iframe:
+        log(f"  ↳ 저장 iframe url: {iframe.get('url', '') or '(비어있음)'}")
+        log(f"  ↳ 저장 iframe title: {iframe.get('title', '') or '(비어있음)'}")
+        text = iframe.get("text", "")
+        if text:
+            log(f"  ↳ 저장 iframe 내용: {text[:500]}")
+        if iframe.get("html"):
+            _save_debug_html(log, f"{label}_저장_iframe", iframe.get("html", ""))
+        elif iframe.get("error"):
+            log(f"  ↳ 저장 iframe 확인 실패: {iframe.get('error')}")
+    return info
+
+
+def _wait_for_post_save_state(driver, log, timeout=12):
+    deadline = time.time() + timeout
+    last_info = {}
+    while time.time() < deadline:
+        _switch_to_form_window(driver, log)
+        _wait_for_page_idle(driver, None, "보안코드 확인 후 저장 반영", timeout=2)
+        if _has_attach_entry(driver):
+            log("  ✓ 보안코드 확인 후 첨부 영역 감지")
+            return True
+
+        last_info = _collect_save_diagnostics(driver)
+        if _looks_like_save_server_error(last_info):
+            _err_box(
+                log,
+                "임시저장 서버 응답 오류",
+                "보안코드 확인 후 저장 iframe에서 오류 응답이 감지됐습니다",
+                [
+                    "DevTools Network에서 sellerApply/cud_new 요청의 Status/Response/Payload를 확인하세요",
+                    "로그에 저장된 저장 iframe HTML을 확인하세요",
+                ],
+            )
+            _log_save_diagnostics(log, driver, "임시저장_서버_응답_오류")
+            _log_debug_context(log, driver, "임시저장 서버 응답 오류")
+            return False
+        time.sleep(0.5)
+
+    _err_box(
+        log,
+        "보안코드 확인 후 첨부 영역을 찾을 수 없음",
+        "보안코드 확인 후에도 저장 완료/첨부 영역 표시가 확인되지 않았습니다",
+        [
+            "저장 iframe에 404/오류 응답이 있는지 확인하세요",
+            "현재 화면이 임시저장 단계에 머물러 있는지 확인하세요",
+        ],
+    )
+    _log_save_diagnostics(log, driver, "보안코드_이후_첨부_영역_없음")
+    _log_debug_context(log, driver, "보안코드 이후 첨부 영역 없음")
+    return False
+
+
 def _switch_to_security_code_window(driver, wait, parent_handle, before_handles, log, quiet=False):
     def find_security_window(d):
         handles = list(d.window_handles)
@@ -910,7 +1154,7 @@ def _solve_security_code(driver, wait, parent_handle, before_handles, log):
     _safe_input(driver, wait, "randeomChk", reversed_code, "보안코드", log)
     log("  ✓ 보안코드 입력 완료")
 
-    _click_element(
+    _click_element_native(
         driver,
         wait,
         (By.XPATH, "//button[contains(@onclick, 'goCompare')]"),
@@ -919,35 +1163,26 @@ def _solve_security_code(driver, wait, parent_handle, before_handles, log):
     )
     log("  ✓ 확인 버튼 클릭")
 
-    handled, txt = _accept_alert(driver, timeout=2, retries=2)
+    handled, txt = _accept_alert(driver, timeout=5, retries=2)
     if handled and txt:
         log(f"  ✓ 보안코드 확인 Alert 처리: '{txt}'")
+    elif handled:
+        log("  ✓ 보안코드 확인 Alert 처리")
+    else:
+        log("  ✓ 보안코드 확인 Alert 없음")
 
     try:
-        WebDriverWait(driver, 3).until(
+        WebDriverWait(driver, 8).until(
             lambda d: security_handle not in d.window_handles
             or not _has_security_code_elements(d)
         )
     except TimeoutException:
-        _warn_box(log, "보안코드 창 닫힘 확인", "3초 내 자동 닫힘 확인이 안 되어 부모창으로 바로 복귀합니다")
+        _warn_box(log, "보안코드 창 닫힘 확인", "8초 내 자동 닫힘 확인이 안 되어 부모창으로 바로 복귀합니다")
 
     _switch_to_form_window(driver, log, preferred_handle=parent_handle)
     _wait_for_page_idle(driver, log, "보안코드 확인 후 부모 화면", timeout=5)
-    try:
-        WebDriverWait(driver, 6).until(
-            lambda d: d.find_elements(
-                By.XPATH, "//*[@onclick and contains(@onclick, 'popupAttachFile')]"
-            )
-        )
-    except TimeoutException:
-        _err_box(
-            log,
-            "보안코드 확인 후 첨부 영역을 찾을 수 없음",
-            "보안코드 확인은 눌렀지만 부모 신청서 화면에 첨부 버튼이 나타나지 않았습니다",
-            ["보안코드 팝업에 오류 메시지가 남아 있는지 확인하세요"],
-        )
-        _log_debug_context(log, driver, "보안코드 이후 첨부 영역 없음")
-        raise
+    if not _wait_for_post_save_state(driver, log, timeout=12):
+        raise RuntimeError("임시저장 완료 여부 확인 실패")
 
 
 def _focus_current_window(driver):
